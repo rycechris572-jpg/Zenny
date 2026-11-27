@@ -65,6 +65,42 @@ local EVASIVE_KEYS = { Back = Enum.KeyCode.S, Left = Enum.KeyCode.A, Right = Enu
 local SMOOTH = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local QUICK = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
+-- Bot.
+local Bot = {
+	key = Enum.KeyCode.B,
+	active = false,
+	saved = nil,
+	target = nil,
+	strafeSign = 1,
+	strafeUntil = 0,
+	nextM1 = 0,
+	nextDash = 0,
+	hits = 0,
+	lastM1 = 0,
+	moveVector = Vector3.zero,
+	status = "Off",
+	-- Features the bot forces on while it runs; the old values come back when it stops.
+	profile = {
+		autoBlock = true,
+		blockFull = true,
+		broadDetect = true,
+		blockFace = true,
+		blockShove = true,
+		consecBlock = true,
+		autoEvasive = true,
+		evasiveMode = "Both",
+		dashPredict = true,
+		frontBlock = true,
+		counterBait = true,
+		counterPunish = true,
+		catchEnabled = true,
+		catchSmart = true,
+		bdcEnabled = true,
+		preBlock = false,
+		shoveM1 = true,
+	},
+}
+
 -- State.
 local localPlayer = playersService.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
@@ -220,6 +256,20 @@ local Settings = {
 	labStartup = 0.05,
 	labHit = 0.3,
 	labDryRun = true,
+	botEnabled = false,
+	botPlayersOnly = true,
+	botTargetMode = "Nearest",
+	botRange = 120,
+	botEngage = 5,
+	botReach = 7,
+	botM1Rate = 0.2,
+	botComboPause = 0.55,
+	botStrafe = true,
+	botRespectBlock = true,
+	botDashIn = true,
+	botDashRange = 20,
+	botUseTech = false,
+	botRetreatHp = 20,
 }
 
 ---Connect a signal and track it for detach.
@@ -2318,6 +2368,232 @@ local function onDescendantAdded(instance)
 	end
 end
 
+---Turn the script's defensive features on for the bot, or give the old values back.
+---@param on boolean
+function Bot.applyProfile(on)
+	if on then
+		Bot.saved = {}
+		for key, value in pairs(Bot.profile) do
+			Bot.saved[key] = Settings[key]
+			Settings[key] = value
+		end
+	elseif Bot.saved then
+		for key, value in pairs(Bot.saved) do
+			Settings[key] = value
+		end
+		Bot.saved = nil
+	end
+
+	for key in pairs(Bot.profile) do
+		local refresh = uiRefreshers[key]
+		if refresh then
+			refresh(true)
+		end
+	end
+end
+
+---Pick the enemy the bot should fight.
+---@param myCharacter Model
+---@param myRoot BasePart
+---@return Model?, BasePart?, Humanoid?
+function Bot.findTarget(myCharacter, myRoot)
+	local best, bestRoot, bestHumanoid, bestScore = nil, nil, nil, math.huge
+	local container = workspace:FindFirstChild("Live") or workspace
+
+	for _, character in ipairs(container:GetChildren()) do
+		if character == myCharacter or not character:IsA("Model") or isIgnored(character) then
+			continue
+		end
+
+		if Settings.botPlayersOnly and not playersService:GetPlayerFromCharacter(character) then
+			continue
+		end
+
+		local root = character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if not (root and humanoid and humanoid.Health > 0) then
+			continue
+		end
+
+		local distance = (root.Position - myRoot.Position).Magnitude
+		if distance > Settings.botRange then
+			continue
+		end
+
+		local score = Settings.botTargetMode == "Lowest HP" and (humanoid.Health + distance * 0.1) or distance
+
+		-- Stick with the current target so the bot does not flip between two.
+		if character == Bot.target then
+			score *= 0.7
+		end
+
+		if score < bestScore then
+			best, bestRoot, bestHumanoid, bestScore = character, root, humanoid, score
+		end
+	end
+
+	return best, bestRoot, bestHumanoid
+end
+
+---Work out where the bot should walk this frame.
+---@param myRoot BasePart
+---@param targetRoot BasePart
+---@param distance number
+---@param retreat boolean
+---@param now number
+function Bot.updateMove(myRoot, targetRoot, distance, retreat, now)
+	if now > Bot.strafeUntil then
+		Bot.strafeSign = -Bot.strafeSign
+		Bot.strafeUntil = now + 0.5 + math.random()
+	end
+
+	-- Aim at where they will be, not where they are.
+	local predicted = targetRoot.Position + targetRoot.AssemblyLinearVelocity * 0.12
+	local offset = (predicted - myRoot.Position) * Vector3.new(1, 0, 1)
+	if offset.Magnitude < 0.1 then
+		Bot.moveVector = Vector3.zero
+		return
+	end
+
+	local direction = offset.Unit
+	local tangent = Vector3.new(-direction.Z, 0, direction.X) * Bot.strafeSign
+	local strafe = Settings.botStrafe and 1 or 0
+	local engage = Settings.botEngage
+
+	if retreat then
+		Bot.moveVector = -direction + tangent * 0.5 * strafe
+	elseif distance > engage + 1.5 then
+		Bot.moveVector = direction + tangent * 0.15 * strafe
+	elseif distance < engage - 1.5 then
+		Bot.moveVector = -direction * 0.6 + tangent * strafe
+	else
+		Bot.moveVector = tangent * strafe
+	end
+end
+
+---Run the fighting bot: pick a target, close in, M1 in strings and back off when low.
+function Bot.update()
+	if Settings.botEnabled ~= Bot.active then
+		Bot.active = Settings.botEnabled
+		Bot.applyProfile(Bot.active)
+		Bot.target = nil
+		Bot.moveVector = Vector3.zero
+		Bot.hits = 0
+
+		if not Bot.active then
+			local _, _, humanoid = getMe()
+			if humanoid then
+				humanoid:Move(Vector3.zero, false)
+			end
+			stopLock()
+			Bot.status = "Off"
+		end
+	end
+
+	if not Bot.active then
+		return
+	end
+
+	local myCharacter, myRoot, myHumanoid = getMe()
+	if not (myCharacter and myRoot and myHumanoid) or myHumanoid.Health <= 0 then
+		Bot.moveVector = Vector3.zero
+		Bot.status = "Waiting for respawn"
+		return
+	end
+
+	local targetCharacter, targetRoot = Bot.findTarget(myCharacter, myRoot)
+	Bot.target = targetCharacter
+	if not targetCharacter then
+		Bot.moveVector = Vector3.zero
+		Bot.status = "No target"
+		return
+	end
+
+	local now = os.clock()
+	local distance = (targetRoot.Position - myRoot.Position).Magnitude
+	local flatDistance = ((targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+	local hpPercent = myHumanoid.Health / math.max(myHumanoid.MaxHealth, 1) * 100
+	local retreat = Settings.botRetreatHp > 0 and hpPercent < Settings.botRetreatHp
+	local stunned = isRagdolled(myCharacter, myHumanoid) or techBusy
+	local blocking = blockDown or heldBlocks > 0 or now < blockUntil
+
+	-- Always face them; the lock also keeps the block pointed at the attacker.
+	startLock(targetRoot, true)
+
+	if stunned then
+		Bot.moveVector = Vector3.zero
+		Bot.status = "Stunned"
+		return
+	end
+
+	Bot.updateMove(myRoot, targetRoot, distance, retreat, now)
+
+	-- Gap close with a front dash; the tech dash flicks around them if enabled.
+	if Settings.botDashIn and not retreat and not blocking and distance > Settings.botDashRange and now >= Bot.nextDash and not isOnCooldown("forward") then
+		local remote = getRemote()
+		if remote then
+			Bot.nextDash = now + 1.2
+			updateLock(myRoot, true)
+			if Settings.botUseTech then
+				task.spawn(runTech, myRoot, targetRoot)
+			else
+				remote:FireServer(FRONT_DASH)
+			end
+			log(string.format("bot: dash in (%d studs)", distance))
+		end
+	end
+
+	-- Attack: blocks hold F, and F stops M1, so never swing while blocking.
+	local canSwing = not blocking and not retreat and flatDistance <= Settings.botReach and now >= Bot.nextM1
+	if canSwing and Settings.botRespectBlock and isBlocking(targetCharacter) then
+		canSwing = false
+		Bot.status = "Target blocking"
+	elseif canSwing and isCountering(targetCharacter) then
+		canSwing = false
+		Bot.status = "Target countering"
+	end
+
+	if canSwing then
+		if now - Bot.lastM1 > 1 then
+			Bot.hits = 0
+		end
+
+		updateLock(myRoot, true)
+		if clickM1("bot") then
+			Bot.lastM1 = now
+			Bot.hits += 1
+
+			-- A full string has endlag; pause, then start the next one.
+			if Bot.hits >= 4 then
+				Bot.hits = 0
+				Bot.nextM1 = now + Settings.botComboPause
+			else
+				Bot.nextM1 = now + Settings.botM1Rate
+			end
+		end
+
+		Bot.status = "Attacking " .. targetCharacter.Name
+	elseif retreat then
+		Bot.status = "Retreating"
+	elseif blocking then
+		Bot.status = "Blocking"
+	elseif Bot.status == "Off" or Bot.status == "No target" or Bot.status == "Waiting for respawn" or Bot.status == "Stunned" or flatDistance > Settings.botReach then
+		Bot.status = "Chasing " .. targetCharacter.Name
+	end
+end
+
+---Feed the bot's walk direction to the humanoid each frame.
+function Bot.applyMove()
+	if not Bot.active or Bot.moveVector.Magnitude < 0.01 then
+		return
+	end
+
+	local _, _, humanoid = getMe()
+	if humanoid and humanoid.Health > 0 then
+		humanoid:Move(Bot.moveVector.Unit, false)
+	end
+end
+
 ---Apply settings that need a one-time write when changed.
 ---@param key string
 local function onSettingChanged(key)
@@ -4393,6 +4669,36 @@ local function buildGui()
 		return learning == "shove" and "waiting..." or (countLearned("shove") .. " ids")
 	end)
 
+	-- Bot.
+	local botPage = addPage("Bot", 9, "🤖")
+
+	local botMain = addSection(botPage, "Fight Bot")
+	addSwitch(botMain, "Enabled", "Fights, blocks and dodges for you (B)", "botEnabled")
+	addInfo(botMain, "Status", function()
+		return Bot.status
+	end)
+	addSwitch(botMain, "Players Only", "Ignore NPCs and dummies", "botPlayersOnly")
+	addCycle(botMain, "Target", "Who to fight", "botTargetMode", { "Nearest", "Lowest HP" })
+	addSlider(botMain, "Search Range", "Look for targets inside", "botRange", 20, 300, 5, " studs")
+
+	local botFight = addSection(botPage, "Fighting")
+	addSlider(botFight, "Spacing", "Distance it holds from them", "botEngage", 2, 12, 0.5, " studs")
+	addSlider(botFight, "Hit Reach", "Swings inside this", "botReach", 3, 12, 0.5, " studs")
+	addSlider(botFight, "M1 Rate", "Seconds between swings", "botM1Rate", 0.1, 0.5, 0.01, "s")
+	addSlider(botFight, "String Pause", "Rest after four swings", "botComboPause", 0.2, 1.2, 0.05, "s")
+	addSwitch(botFight, "Strafe", "Circle around the target", "botStrafe")
+	addSwitch(botFight, "Wait Out Blocks", "No M1 into a blocking target", "botRespectBlock")
+	addSlider(botFight, "Retreat Below", "Back off under this health, 0 = never", "botRetreatHp", 0, 60, 5, "%")
+
+	local botDash = addSection(botPage, "Gap Close")
+	addSwitch(botDash, "Dash In", "Front dash when far away", "botDashIn")
+	addSwitch(botDash, "Use Tech Dash", "Flick dash from the Tech page", "botUseTech")
+	addSlider(botDash, "Dash Range", "Dash when farther than this", "botDashRange", 10, 60, 1, " studs")
+
+	addInfo(botDash, "Also Active", function()
+		return "Auto Block, Evasive, Consec, Dash M1, Counter Bait"
+	end)
+
 	-- Combat Lab.
 	local lab = addPage("Lab", 2, "🧪")
 
@@ -5257,6 +5563,7 @@ function Zenny.init()
 		updateDashes()
 		updateEvasive()
 		updatePreBlock()
+		Bot.update()
 		updateBlockController()
 		updateCounterBait()
 		updateLockFrame()
@@ -5266,7 +5573,20 @@ function Zenny.init()
 		updateComboCounter()
 	end)
 
+	connect(userInputService.InputBegan, function(input, processed)
+		if processed or input.KeyCode ~= Bot.key then
+			return
+		end
+
+		Settings.botEnabled = not Settings.botEnabled
+		local refresh = uiRefreshers.botEnabled
+		if refresh then
+			refresh(true)
+		end
+	end)
+
 	connect(runService.RenderStepped, function()
+		Bot.applyMove()
 		local camera = workspace.CurrentCamera
 		if Settings.fovEnabled and camera then
 			camera.FieldOfView = Settings.fov
@@ -5310,6 +5630,13 @@ function Zenny.detach()
 			remote:FireServer({ Goal = "KeyRelease", Key = BLOCK_KEY })
 		end
 		blockDown = false
+	end
+
+	if Bot.active then
+		Bot.active = false
+		Settings.botEnabled = false
+		Bot.applyProfile(false)
+		Bot.moveVector = Vector3.zero
 	end
 
 	labRun = nil
