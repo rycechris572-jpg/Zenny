@@ -1,0 +1,5339 @@
+-- Check for table that is shared between executions.
+if not shared then
+	return warn("No shared, no script.")
+end
+
+-- Module table.
+local Zenny = {}
+
+-- Services.
+local playersService = game:GetService("Players")
+local runService = game:GetService("RunService")
+local lightingService = game:GetService("Lighting")
+local userInputService = game:GetService("UserInputService")
+local tweenService = game:GetService("TweenService")
+local statsService = game:GetService("Stats")
+local httpService = game:GetService("HttpService")
+local coreGuiService = game:GetService("CoreGui")
+
+-- Constants.
+local BLOCK_KEY = Enum.KeyCode.F
+local TOGGLE_KEY = Enum.KeyCode.RightShift
+local COLORS = {
+	card = Color3.fromRGB(12, 22, 16),
+	accent = Color3.fromRGB(64, 255, 112),
+	accentDark = Color3.fromRGB(24, 150, 70),
+	text = Color3.fromRGB(240, 250, 243),
+	dim = Color3.fromRGB(150, 172, 158),
+	off = Color3.fromRGB(30, 44, 36),
+	good = Color3.fromRGB(120, 255, 190),
+	now = Color3.fromRGB(255, 240, 130),
+	bad = Color3.fromRGB(255, 110, 130),
+	warn = Color3.fromRGB(255, 200, 110),
+	ink = Color3.fromRGB(5, 14, 8),
+}
+local DASH_TYPES = {
+	["10480793962"] = "RIGHT",
+	["10480796021"] = "LEFT",
+	["10491993682"] = "BACK",
+	["10479335397"] = "FRONT",
+}
+local UPPERCUT_IDS = { ["10503381238"] = true, ["13379003796"] = true }
+-- Seed animation ids from memory; unverified. Learn buttons add the real ones.
+local SEED_IDS = {
+	barrage = { ["10466974800"] = true },
+	shove = { ["10471336737"] = true },
+}
+local ACTION_PRIORITIES = {
+	[Enum.AnimationPriority.Action] = true,
+	[Enum.AnimationPriority.Action2] = true,
+	[Enum.AnimationPriority.Action3] = true,
+	[Enum.AnimationPriority.Action4] = true,
+}
+local REACTION_STATES = {
+	[Enum.HumanoidStateType.Physics] = true,
+	[Enum.HumanoidStateType.FallingDown] = true,
+	[Enum.HumanoidStateType.Ragdoll] = true,
+	[Enum.HumanoidStateType.PlatformStanding] = true,
+	[Enum.HumanoidStateType.Dead] = true,
+}
+-- Enemies in these states are skipped, like KittyWare's ignore list.
+local ENEMY_IGNORE = { "DoingEmote", "CancelEmote", "CancelEmote2", "BeingLaunched", "Freeze" }
+local COUNTER_NAMES = { "Counter", "HunterCounter", "AtomicCounter" }
+local FRONT_DASH = { Dash = Enum.KeyCode.W, Key = Enum.KeyCode.Q, Goal = "KeyPress" }
+local EVASIVE_KEYS = { Back = Enum.KeyCode.S, Left = Enum.KeyCode.A, Right = Enum.KeyCode.D }
+local SMOOTH = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local QUICK = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+-- State.
+local localPlayer = playersService.LocalPlayer
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+local connections = {}
+local logLines = {}
+local seenTracks = setmetatable({}, { __mode = "k" })
+local ownSeen = setmetatable({}, { __mode = "k" })
+local lastTime = setmetatable({}, { __mode = "k" })
+local ownTime = setmetatable({}, { __mode = "k" })
+local watched = setmetatable({}, { __mode = "k" })
+local enemyHealth = setmetatable({}, { __mode = "k" })
+local enemyHurtAt = setmetatable({}, { __mode = "k" })
+local lastMoveEnd = setmetatable({}, { __mode = "k" })
+local counterSeen = setmetatable({}, { __mode = "k" })
+local comboHealth = setmetatable({}, { __mode = "k" })
+local moves = {}
+local dashes = {}
+local espObjects = {}
+local safeMarkers = {}
+local uiRefreshers = {}
+local friendCache = {}
+-- Learned animations and move timings survive re-executes.
+local learned = shared.ZennyLearned or { barrage = {}, shove = {}, uppercut = {} }
+shared.ZennyLearned = learned
+learned.back = learned.back or {}
+learned.front = learned.front or {}
+learned.m1 = learned.m1 or {}
+-- Measured dash speeds per dash kind survive re-executes.
+local dashSpeeds = shared.ZennySpeeds or {}
+shared.ZennySpeeds = dashSpeeds
+local moveData = shared.ZennyMoves or {}
+shared.ZennyMoves = moveData
+local remoteCache = nil
+local heldBlocks = 0
+local blockLockedUntil = 0
+local blockHoldUntil = 0
+local blockUntil = 0
+local blockDown = false
+local nextEvasiveAt = 0
+local ragdollSince = nil
+local m1ButtonCache = nil
+local evasiveLockedUntil = 0
+local ownActionUntil = 0
+local lockState = nil
+local alignOrientation = nil
+local alignAttachment = nil
+local techBusy = false
+local learning = nil
+local learningUntil = 0
+local labRun = nil
+local labDummy = nil
+local boundHumanoid = nil
+local lastHealth = 0
+local gui = nil
+local holder = nil
+local selfHighlight = nil
+local comboHud = nil
+local comboHits = 0
+local comboDamage = 0
+local comboLastAt = 0
+local presetStatus = "No preset action yet"
+local originalShadows = lightingService.GlobalShadows
+
+local Settings = {
+	friendCheck = false,
+	autoBlock = false,
+	blockFull = true,
+	broadDetect = true,
+	m1Method = "Remote+Mobile",
+	adaptiveBlock = false,
+	blockRange = 22,
+	blockHold = 0.35,
+	blockLead = 0.1,
+	faceCheck = false,
+	selfGrace = 0.1,
+	blockTail = 0.25,
+	preBlock = false,
+	preBlockRange = 8,
+	autoEvasive = false,
+	evasiveMode = "Ragdoll",
+	evasiveDirection = "Back",
+	evasiveBlock = false,
+	evasiveRate = 0.06,
+	consecBlock = false,
+	consecChance = 100,
+	consecRange = 18,
+	shoveM1 = false,
+	shoveDelay = 0.07,
+	shoveRange = 15,
+	catchEnabled = false,
+	catchVisual = true,
+	catchFace = true,
+	catchPing = true,
+	catchRange = 30,
+	catchReach = 10,
+	catchSmart = true,
+	catchSpeed = 60,
+	blockShove = false,
+	blockFov = 360,
+	blockFace = true,
+	dashPredict = true,
+	predictRange = 28,
+	predictReach = 11,
+	predictTail = 0.5,
+	catchOffset = 0.05,
+	catchDelay = 0.2,
+	catchLock = 1.5,
+	catchZones = true,
+	catchCloseRange = 15,
+	catchCloseDelay = 0,
+	catchFarDelay = 0.3,
+	bdcEnabled = false,
+	bdcRange = 25,
+	bdcReach = 12,
+	bdcDelay = 0,
+	frontBlock = true,
+	frontRange = 30,
+	frontM1 = true,
+	frontM1Range = 30,
+	frontMaxHold = 0,
+	frontTail = 0.4,
+	counterBait = false,
+	counterPunish = false,
+	techLoop = false,
+	techRange = 40,
+	techStartDelay = 0.1,
+	techStart = 0,
+	techSecond = 0,
+	techSecondDelay = 0.04,
+	techThird = 0,
+	techThirdDelay = 0.12,
+	techJump = true,
+	techCamera = false,
+	esp = false,
+	selfChams = false,
+	fovEnabled = false,
+	fov = 90,
+	noSmoke = false,
+	noShadows = false,
+	safeIndicator = false,
+	safeRange = 25,
+	comboCounter = false,
+	quickPills = true,
+	indicators = true,
+	debugConsole = false,
+	presetSlot = "Slot 1",
+	labTest = "Side Dash In",
+	labDistance = 12,
+	labAttackDist = 5,
+	labPing = 60,
+	labSpeed = 60,
+	labReach = 12,
+	labStartup = 0.05,
+	labHit = 0.3,
+	labDryRun = true,
+}
+
+---Connect a signal and track it for detach.
+---@param signal RBXScriptSignal
+---@param callback function
+local function connect(signal, callback)
+	local connection = signal:Connect(callback)
+	table.insert(connections, connection)
+	return connection
+end
+
+---Create an instance with properties in one call.
+---@param className string
+---@param properties table
+---@param parent Instance?
+local function newInstance(className, properties, parent)
+	local instance = Instance.new(className)
+	for key, value in pairs(properties) do
+		instance[key] = value
+	end
+	instance.Parent = parent
+	return instance
+end
+
+---Play a smooth tween on an instance.
+---@param instance Instance
+---@param properties table
+---@param info TweenInfo?
+local function tween(instance, properties, info)
+	tweenService:Create(instance, info or SMOOTH, properties):Play()
+end
+
+---Add a line to the debug log.
+---@param text string
+local function log(text)
+	table.insert(logLines, string.format("%5.1f  %s", os.clock() % 1000, text))
+	if #logLines > 60 then
+		table.remove(logLines, 1)
+	end
+
+	if Settings.debugConsole then
+		print("[Zenny] " .. text)
+	end
+end
+
+---Get the current ping in milliseconds.
+---@return number
+local function getPing()
+	local ok, value = pcall(function()
+		return statsService.Network.ServerStatsItem["Data Ping"]:GetValue()
+	end)
+
+	return ok and value or 0
+end
+
+---Get the ping used for timing; the lab can simulate a different one.
+---@return number
+local function effectivePing()
+	if labRun then
+		return Settings.labPing
+	end
+
+	return getPing()
+end
+
+---Record an event while a lab test is running.
+---@param name string
+---@param data table?
+local function labEvent(name, data)
+	if labRun then
+		table.insert(labRun.events, { name = name, t = os.clock() - labRun.t0, data = data or {} })
+	end
+end
+
+---Get our character, root and humanoid.
+---@return Model?, BasePart?, Humanoid?
+local function getMe()
+	local character = localPlayer.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	return character, root, humanoid
+end
+
+---Check whether a character belongs to a friend.
+---@param character Model
+---@return boolean
+local function isFriend(character)
+	local player = playersService:GetPlayerFromCharacter(character)
+	if not player then
+		return false
+	end
+
+	if friendCache[player.UserId] == nil then
+		friendCache[player.UserId] = false
+		task.spawn(function()
+			local ok, result = pcall(function()
+				return localPlayer:IsFriendsWith(player.UserId)
+			end)
+			friendCache[player.UserId] = ok and result == true
+		end)
+	end
+
+	return friendCache[player.UserId] == true
+end
+
+---Check whether a character is whitelisted or a skipped friend.
+---@param character Model
+---@return boolean
+local function isIgnored(character)
+	local player = playersService:GetPlayerFromCharacter(character)
+	if player and Settings["wl_" .. player.Name] then
+		return true
+	end
+
+	return Settings.friendCheck and isFriend(character)
+end
+
+---Get the character's input remote that the game's own controls fire.
+---@return RemoteEvent?
+local function getRemote()
+	local character = localPlayer.Character
+	if remoteCache and remoteCache.Parent and character and remoteCache:IsDescendantOf(character) then
+		return remoteCache
+	end
+
+	remoteCache = nil
+	local found = character and character:FindFirstChild("Communicate", true)
+	if found and found:IsA("RemoteEvent") then
+		remoteCache = found
+	end
+
+	return remoteCache
+end
+
+---Fire the game's own listeners of an input signal with a synthetic input.
+---@param signal RBXScriptSignal
+---@param inputType Enum.UserInputType
+---@param state Enum.UserInputState
+---@return boolean
+local function fireInputListeners(signal, inputType, state)
+	if not getconnections then
+		return false
+	end
+
+	local fakeInput = {
+		UserInputType = inputType,
+		UserInputState = state,
+		KeyCode = Enum.KeyCode.Unknown,
+		Position = Vector3.zero,
+		Delta = Vector3.zero,
+		IsModifierKeyDown = function()
+			return false
+		end,
+	}
+
+	local fired = 0
+	for _, connection in ipairs(getconnections(signal)) do
+		local callback = connection.Function
+		-- Engine connections have no Lua function; skip them and our own.
+		if callback and not (isexecutorclosure and isexecutorclosure(callback)) then
+			fired += 1
+			task.spawn(function()
+				pcall(function()
+					connection:Fire(fakeInput, false)
+				end)
+			end)
+		end
+	end
+
+	return fired > 0
+end
+
+---Find an on-screen M1 button.
+---@return GuiButton?
+local function findM1Button()
+	if m1ButtonCache and m1ButtonCache.Parent then
+		return m1ButtonCache
+	end
+
+	for _, descendant in ipairs(playerGui:GetDescendants()) do
+		if descendant:IsA("GuiButton") then
+			local name = descendant.Name:lower()
+			if name == "m1" or name:find("attack", 1, true) or name:find("click", 1, true) then
+				m1ButtonCache = descendant
+				return descendant
+			end
+		end
+	end
+
+	return nil
+end
+
+---Fire the signals of a gui button the way a tap would.
+---@param button GuiButton
+---@param down boolean
+local function pressButton(button, down)
+	local names = down and { "MouseButton1Down", "InputBegan", "Activated", "MouseButton1Click" } or { "MouseButton1Up", "InputEnded" }
+	for _, signalName in ipairs(names) do
+		for _, connection in ipairs(getconnections(button[signalName])) do
+			task.spawn(function()
+				pcall(function()
+					connection:Fire({
+						UserInputType = Enum.UserInputType.Touch,
+						UserInputState = down and Enum.UserInputState.Begin or Enum.UserInputState.End,
+						KeyCode = Enum.KeyCode.Unknown,
+						Position = Vector3.zero,
+					})
+				end)
+			end)
+		end
+	end
+end
+
+---Send an M1 with a specific method.
+---@param method string
+---@param reason string?
+---@return boolean
+local function sendM1(method, reason)
+	local tag = string.format("%s (%s)", method, reason or "?")
+
+	if method == "Remote+Mobile" or method == "Remote" then
+		local remote = getRemote()
+		if not remote then
+			log("M1 FAILED: no Communicate remote " .. tag)
+			return false
+		end
+
+		local mobile = method == "Remote+Mobile"
+		remote:FireServer(mobile and { Goal = "LeftClick", Mobile = true } or { Goal = "LeftClick" })
+		task.delay(0.06, function()
+			local current = getRemote()
+			if current then
+				current:FireServer(mobile and { Goal = "LeftClickRelease", Mobile = true } or { Goal = "LeftClickRelease" })
+			end
+		end)
+	elseif method == "Signal" then
+		if not fireInputListeners(userInputService.InputBegan, Enum.UserInputType.MouseButton1, Enum.UserInputState.Begin) then
+			log("M1 FAILED: no input listeners " .. tag)
+			return false
+		end
+
+		task.delay(0.06, function()
+			fireInputListeners(userInputService.InputEnded, Enum.UserInputType.MouseButton1, Enum.UserInputState.End)
+		end)
+	else
+		local button = getconnections and findM1Button()
+		if not button then
+			log("M1 FAILED: no M1 button found " .. tag)
+			return false
+		end
+
+		pressButton(button, true)
+		task.delay(0.06, function()
+			pressButton(button, false)
+		end)
+	end
+
+	log("M1 sent via " .. tag)
+	return true
+end
+
+---Send an M1 with the selected method.
+---@param reason string?
+---@return boolean
+local function clickM1(reason)
+	if labRun then
+		labEvent("M1", { reason = reason })
+		if Settings.labDryRun then
+			log("M1 (dry run) " .. tostring(reason))
+			return true
+		end
+	end
+
+	return sendM1(Settings.m1Method, reason)
+end
+
+---Keep block held for at least a duration; overlapping requests extend it.
+---@param duration number
+---@return boolean
+local function requestBlock(duration)
+	if labRun then
+		labEvent("BLOCK", { duration = duration })
+		if Settings.labDryRun then
+			return true
+		end
+	end
+
+	if not getRemote() then
+		log("block FAILED: no Communicate remote")
+		return false
+	end
+
+	blockUntil = math.max(blockUntil, os.clock() + duration)
+	blockHoldUntil = blockUntil
+	return true
+end
+
+---Start holding block until releaseBlock is called.
+---@return boolean
+local function holdBlock()
+	if labRun then
+		labEvent("HOLD")
+		if Settings.labDryRun then
+			return true
+		end
+	end
+
+	if not getRemote() then
+		log("block hold FAILED: no Communicate remote")
+		return false
+	end
+
+	heldBlocks += 1
+	return true
+end
+
+---Let go of one held block.
+local function releaseBlock()
+	if labRun then
+		labEvent("RELEASE")
+	end
+
+	heldBlocks = math.max(heldBlocks - 1, 0)
+end
+
+---Hold block for a duration, defaulting to the Hold Time setting.
+---@param duration number?
+---@return boolean
+local function pressBlock(duration)
+	return requestBlock(duration or Settings.blockHold)
+end
+
+---Press or release the block key so it matches what has been requested.
+local function updateBlockController()
+	local now = os.clock()
+	local want = now < blockUntil or heldBlocks > 0
+	if heldBlocks > 0 then
+		blockHoldUntil = now + 0.2
+	end
+
+	if want == blockDown then
+		return
+	end
+
+	local remote = getRemote()
+	if not remote then
+		blockDown = false
+		return
+	end
+
+	blockDown = want
+	remote:FireServer({ Goal = want and "KeyPress" or "KeyRelease", Key = BLOCK_KEY })
+	if want then
+		log("block down")
+	end
+end
+
+---Check the game's cooldown display for a move or dash.
+---@param name string
+---@return boolean
+local function isOnCooldown(name)
+	local bar = playerGui:FindFirstChild("Bar")
+	local magic = bar and bar:FindFirstChild("MagicHealth")
+	local cooldowns = magic and magic:FindFirstChild("cdholder")
+	local entry = cooldowns and cooldowns:FindFirstChild(name, true)
+	local template = entry and entry:FindFirstChild("template")
+	local fill = template and template:FindFirstChild("Fill")
+
+	return fill ~= nil and fill.Size.Y.Scale > 0.01
+end
+
+---Hold block and dash away to dodge a move.
+---@return boolean
+local function pressEvasive()
+	local now = os.clock()
+	if now < evasiveLockedUntil then
+		return false
+	end
+
+	local remote = getRemote()
+	if not remote then
+		log("evasive FAILED: no Communicate remote")
+		return false
+	end
+
+	evasiveLockedUntil = now + 1
+	requestBlock(0.4)
+	task.delay(0.04, function()
+		local current = getRemote()
+		if current then
+			current:FireServer({ Dash = EVASIVE_KEYS[Settings.evasiveDirection], Key = Enum.KeyCode.Q, Goal = "KeyPress" })
+		end
+	end)
+
+	log("evasive sent (" .. Settings.evasiveDirection .. ")")
+	return true
+end
+
+---Check whether we are ragdolled or knocked down.
+---@param character Model
+---@param humanoid Humanoid
+---@return boolean
+local function isRagdolled(character, humanoid)
+	if character:FindFirstChild("Ragdoll") or character:GetAttribute("Ragdoll") then
+		return true
+	end
+
+	return REACTION_STATES[humanoid:GetState()] == true
+end
+
+---Spam dash while ragdolled so the ragdoll gets cancelled.
+local function updateEvasive()
+	local character, _, humanoid = getMe()
+	local active = Settings.autoEvasive and Settings.evasiveMode ~= "Consec"
+	if not active or not character or not humanoid or humanoid.Health <= 0 or not isRagdolled(character, humanoid) then
+		ragdollSince = nil
+		return
+	end
+
+	local now = os.clock()
+	if not ragdollSince then
+		ragdollSince = now
+		log("ragdolled: spamming dash")
+	end
+
+	-- Stop after a while so a long knockdown does not spam forever.
+	if now - ragdollSince > 4 or now < nextEvasiveAt then
+		return
+	end
+
+	local remote = getRemote()
+	if not remote then
+		return
+	end
+
+	nextEvasiveAt = now + Settings.evasiveRate
+	if Settings.evasiveBlock then
+		requestBlock(0.15)
+	end
+	remote:FireServer({ Dash = EVASIVE_KEYS[Settings.evasiveDirection], Key = Enum.KeyCode.Q, Goal = "KeyPress" })
+end
+
+---Get the numeric asset id of an animation track.
+---@param track AnimationTrack
+---@return string?
+local function getTrackId(track)
+	local animation = track.Animation
+	local id = animation and animation.AnimationId
+	return id and id:match("%d+")
+end
+
+---Decide whether an animation track just started a new play.
+---Games replay one track object, so a seen track can still start again.
+---@param seen table
+---@param times table
+---@param track AnimationTrack
+---@param fromEvent boolean
+---@return boolean
+local function isNewPlay(seen, times, track, fromEvent)
+	local now = os.clock()
+	local seenAt = seen[track]
+	local position = track.TimePosition
+	local previous = times[track]
+	times[track] = position
+
+	if not seenAt then
+		seen[track] = now
+		return fromEvent or position <= 0.35
+	end
+
+	if fromEvent then
+		-- The poll and the event can report the same play a frame apart.
+		if now - seenAt < 0.05 then
+			return false
+		end
+
+		seen[track] = now
+		return true
+	end
+
+	-- Polled: the track restarted if its time went backwards.
+	if previous and position < previous - 0.05 and track.IsPlaying then
+		seen[track] = now
+		return position <= 0.35
+	end
+
+	return false
+end
+
+---Check whether a character is mid counter.
+---@param character Model
+---@return boolean
+local function isCountering(character)
+	for _, name in ipairs(COUNTER_NAMES) do
+		if character:FindFirstChild(name) then
+			return true
+		end
+	end
+
+	return false
+end
+
+---Check whether a character looks like it is blocking.
+---@param character Model
+---@return boolean
+local function isBlocking(character)
+	if character:GetAttribute("Blocking") or character:FindFirstChild("Blocking") then
+		return true
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		return false
+	end
+
+	for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+		if track.Name:lower():find("block", 1, true) then
+			return true
+		end
+	end
+
+	return false
+end
+
+---Remove the orientation constraint used by the lock.
+local function releaseAlign()
+	if alignOrientation then
+		alignOrientation:Destroy()
+		alignOrientation = nil
+	end
+
+	if alignAttachment then
+		alignAttachment:Destroy()
+		alignAttachment = nil
+	end
+end
+
+---Get the orientation constraint, creating it if needed.
+---@param myRoot BasePart
+---@return AlignOrientation
+local function getAlign(myRoot)
+	if alignOrientation and alignOrientation.Parent == myRoot and alignAttachment and alignAttachment.Parent == myRoot then
+		return alignOrientation
+	end
+
+	releaseAlign()
+	alignAttachment = newInstance("Attachment", { Name = "ZennyAlign" }, myRoot)
+	alignOrientation = newInstance("AlignOrientation", {
+		Mode = Enum.OrientationAlignmentMode.OneAttachment,
+		Attachment0 = alignAttachment,
+		RigidityEnabled = false,
+		MaxTorque = 1e9,
+		MaxAngularVelocity = math.huge,
+		Responsiveness = 80,
+	}, myRoot)
+
+	return alignOrientation
+end
+
+---Release the character lock and give rotation back to the game.
+local function stopLock()
+	releaseAlign()
+
+	if not lockState then
+		return
+	end
+
+	local humanoid = lockState.humanoid
+	if humanoid and humanoid.Parent and lockState.autoRotate ~= nil then
+		humanoid.AutoRotate = lockState.autoRotate
+	end
+
+	lockState = nil
+end
+
+---Lock our character onto a target for the configured time.
+---@param targetRoot BasePart
+---@param force boolean? Keep locking even when Lock Target is off.
+local function startLock(targetRoot, force)
+	if lockState then
+		lockState.force = force or lockState.force
+		lockState.root = targetRoot
+		lockState.expires = os.clock() + Settings.catchLock
+		return
+	end
+
+	local _, _, humanoid = getMe()
+	lockState = {
+		force = force,
+		root = targetRoot,
+		expires = os.clock() + Settings.catchLock,
+		humanoid = humanoid,
+		autoRotate = humanoid and humanoid.AutoRotate,
+	}
+
+	-- Stop the game turning the character back while locked.
+	if humanoid then
+		humanoid.AutoRotate = false
+	end
+end
+
+---Turn the character at the target's predicted position.
+---@param myRoot BasePart
+---@param snap boolean
+local function updateLock(myRoot, snap)
+	if not lockState then
+		return
+	end
+
+	if (not Settings.catchFace and not lockState.force) or os.clock() > lockState.expires or not lockState.root.Parent then
+		return stopLock()
+	end
+
+	-- Aim where the target will be once our input reaches the server.
+	local lead = (Settings.catchPing and effectivePing() / 1000 or 0) + 0.03
+	local predicted = lockState.root.Position + lockState.root.AssemblyLinearVelocity * lead
+	local direction = (predicted - myRoot.Position) * Vector3.new(1, 0, 1)
+	if direction.Magnitude < 0.1 then
+		return
+	end
+
+	local goal = CFrame.lookAt(myRoot.Position, myRoot.Position + direction)
+	if snap then
+		myRoot.CFrame = goal
+	end
+
+	-- A constraint turns us without rewriting position, so walking still works.
+	getAlign(myRoot).CFrame = goal
+end
+
+---Keep the character lock tracking its target every frame.
+local function updateLockFrame()
+	local _, myRoot = getMe()
+	if not myRoot then
+		return stopLock()
+	end
+
+	-- The tech turns the character itself.
+	if not techBusy then
+		updateLock(myRoot, false)
+	end
+end
+
+---Stretch a box adornment into a line between two world positions.
+---@param adornment BoxHandleAdornment
+---@param myRoot BasePart
+---@param startPosition Vector3
+---@param endPosition Vector3
+local function setLine(adornment, myRoot, startPosition, endPosition)
+	local length = (endPosition - startPosition).Magnitude
+	if length < 0.05 then
+		adornment.Visible = false
+		return
+	end
+
+	adornment.Visible = true
+	adornment.Adornee = myRoot
+	adornment.Size = Vector3.new(adornment.Size.X, adornment.Size.Y, length)
+	adornment.CFrame = myRoot.CFrame:ToObjectSpace(CFrame.lookAt((startPosition + endPosition) / 2, endPosition))
+end
+
+---Build the timing rings, line and card for a tracked dash.
+---@param entry table
+---@param myRoot BasePart
+local function createVisual(entry, myRoot)
+	local flat = CFrame.new(0, -2.9, 0) * CFrame.Angles(math.rad(90), 0, 0)
+
+	local target = newInstance("CylinderHandleAdornment", {
+		Adornee = entry.root,
+		Height = 0.12,
+		Radius = 2.6,
+		InnerRadius = 2.2,
+		CFrame = flat,
+		Color3 = COLORS.accent,
+		Transparency = 0.35,
+		AlwaysOnTop = true,
+		ZIndex = 1,
+	}, holder)
+
+	local ring = newInstance("CylinderHandleAdornment", {
+		Adornee = entry.root,
+		Height = 0.12,
+		Radius = 7,
+		InnerRadius = 6.65,
+		CFrame = flat,
+		Color3 = COLORS.accentDark,
+		Transparency = 0.1,
+		AlwaysOnTop = true,
+		ZIndex = 2,
+	}, holder)
+
+	local baseLine = newInstance("BoxHandleAdornment", {
+		Adornee = myRoot,
+		Size = Vector3.new(0.2, 0.05, 1),
+		Color3 = COLORS.accentDark,
+		Transparency = 0.55,
+		AlwaysOnTop = true,
+		ZIndex = 1,
+	}, holder)
+
+	local progressLine = newInstance("BoxHandleAdornment", {
+		Adornee = myRoot,
+		Size = Vector3.new(0.3, 0.08, 1),
+		Color3 = COLORS.accent,
+		Transparency = 0.05,
+		AlwaysOnTop = true,
+		ZIndex = 3,
+	}, holder)
+
+	local billboard = newInstance("BillboardGui", {
+		Adornee = entry.root,
+		Size = UDim2.fromOffset(170, 44),
+		StudsOffset = Vector3.new(0, 4.2, 0),
+		AlwaysOnTop = true,
+	}, holder)
+
+	local card = newInstance("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.fromRGB(8, 14, 10),
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, billboard)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, card)
+	local stroke = newInstance("UIStroke", { Color = COLORS.accent, Transparency = 0.3, Thickness = 1.5 }, card)
+
+	local label = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(0, 5),
+		Size = UDim2.new(1, 0, 0, 20),
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.text,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+	}, card)
+
+	local track = newInstance("Frame", {
+		Position = UDim2.new(0.1, 0, 0, 30),
+		Size = UDim2.new(0.8, 0, 0, 6),
+		BackgroundColor3 = COLORS.off,
+		BorderSizePixel = 0,
+	}, card)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+
+	local fill = newInstance("Frame", {
+		Size = UDim2.fromScale(0, 1),
+		BackgroundColor3 = COLORS.accent,
+		BorderSizePixel = 0,
+	}, track)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, fill)
+
+	entry.visual = {
+		baseLine = baseLine,
+		progressLine = progressLine,
+		target = target,
+		ring = ring,
+		billboard = billboard,
+		stroke = stroke,
+		label = label,
+		fill = fill,
+	}
+end
+
+---Update the rings, line and card for the time left until the M1.
+---@param entry table
+---@param remaining number
+---@param myRoot BasePart
+local function updateVisual(entry, remaining, myRoot)
+	local visual = entry.visual
+	local alpha = math.clamp(remaining / math.max(entry.delay or 0.2, 0.01), 0, 1)
+	local counter = entry.countering
+	local now = remaining <= 0.04 and not counter
+	local radius = 2.6 + (7 - 2.6) * alpha
+	local color = counter and COLORS.bad or (now and COLORS.now or COLORS.accent)
+
+	-- Inner radius first so it never exceeds the radius while shrinking.
+	visual.ring.InnerRadius = math.max(radius - 0.35, 0)
+	visual.ring.Radius = radius
+	visual.ring.Color3 = counter and COLORS.bad or (now and COLORS.now or COLORS.accentDark)
+
+	visual.target.InnerRadius = now and 0 or 2.2
+	visual.target.Color3 = color
+	visual.target.Transparency = now and 0.15 or 0.35
+
+	visual.stroke.Color = color
+	visual.fill.BackgroundColor3 = color
+	visual.fill.Size = UDim2.fromScale(1 - alpha, 1)
+	visual.label.TextColor3 = counter and COLORS.bad or (now and COLORS.now or COLORS.text)
+	if counter then
+		visual.label.Text = string.format("%s  COUNTER", entry.kind)
+	elseif now then
+		visual.label.Text = string.format("%s  M1 NOW", entry.kind)
+	else
+		visual.label.Text = string.format("%s  M1 in %.2fs", entry.kind, remaining)
+	end
+
+	-- Ground line from us to them; the bright part fills as the M1 window nears.
+	local ground = Vector3.new(0, -2.9, 0)
+	local startPosition = myRoot.Position + ground
+	local endPosition = entry.root.Position + ground
+	local progress = startPosition:Lerp(endPosition, 1 - alpha)
+
+	setLine(visual.baseLine, myRoot, startPosition, endPosition)
+	setLine(visual.progressLine, myRoot, startPosition, progress)
+	visual.baseLine.Color3 = counter and COLORS.bad or (now and COLORS.now or COLORS.accentDark)
+	visual.progressLine.Color3 = color
+end
+
+---Destroy the visual of a tracked dash.
+---@param entry table
+local function destroyVisual(entry)
+	local visual = entry.visual
+	if not visual then
+		return
+	end
+
+	visual.baseLine:Destroy()
+	visual.progressLine:Destroy()
+	visual.target:Destroy()
+	visual.ring:Destroy()
+	visual.billboard:Destroy()
+	entry.visual = nil
+end
+
+---Check whether an animation track has finished.
+---@param track AnimationTrack
+---@param elapsed number
+---@return boolean
+local function trackEnded(track, elapsed)
+	if not track.IsPlaying then
+		return true
+	end
+
+	local length = track.Length
+	if length > 0 and elapsed > length + 0.5 then
+		return true
+	end
+
+	return elapsed > 6
+end
+
+---Release held blocks and M1 when a front dash ends close to us.
+---@param entry table
+---@param silent boolean?
+local function onDashEnded(entry, silent)
+	if entry.holding then
+		entry.holding = false
+
+		-- Keep blocking a moment longer: the M1 usually comes right after the dash.
+		if not silent then
+			requestBlock(Settings.frontTail)
+		end
+		releaseBlock()
+	end
+
+	if silent or entry.kind ~= "FRONT" or not Settings.frontM1 or not entry.root.Parent then
+		return
+	end
+
+	local _, myRoot = getMe()
+	if not myRoot or (entry.root.Position - myRoot.Position).Magnitude > Settings.frontM1Range then
+		return
+	end
+
+	if Settings.counterBait and isCountering(entry.root.Parent) then
+		return
+	end
+
+	startLock(entry.root, true)
+	updateLock(myRoot, true)
+	clickM1("front dash end")
+end
+
+---Remove a tracked dash and its visual.
+---@param track AnimationTrack
+---@param silent boolean? Skip the end-of-dash M1.
+local function untrackDash(track, silent)
+	local entry = dashes[track]
+	if entry then
+		destroyVisual(entry)
+
+		-- Remember how fast this kind of dash really is.
+		local peak = entry.peakSpeed or 0
+		if not silent and entry.kind ~= "FRONT" and peak > 20 and peak < 200 then
+			local previous = dashSpeeds[entry.kind]
+			dashSpeeds[entry.kind] = previous and (previous * 0.7 + peak * 0.3) or peak
+		end
+
+		onDashEnded(entry, silent)
+	end
+	dashes[track] = nil
+end
+
+---Start tracking a dash in range.
+---@param ctx table
+local function onDashTrack(ctx)
+	local kind = ctx.kind
+	local enabled, range
+	if kind == "BACK" then
+		enabled, range = Settings.bdcEnabled, Settings.bdcRange
+	elseif kind == "FRONT" then
+		enabled, range = Settings.frontBlock, Settings.frontRange
+	else
+		enabled = Settings.catchEnabled or Settings.catchVisual or Settings.catchFace or Settings.dashPredict
+		range = math.max(Settings.catchRange, Settings.dashPredict and Settings.predictRange or 0)
+	end
+
+	if not enabled or ctx.distance > range then
+		return
+	end
+
+	local entry = {
+		root = ctx.root,
+		kind = kind,
+		range = range,
+		startedAt = os.clock(),
+		t0 = ctx.t0,
+		fired = false,
+	}
+
+	if dashes[ctx.track] then
+		untrackDash(ctx.track, true)
+	end
+	dashes[ctx.track] = entry
+
+	if kind == "FRONT" then
+		-- Block until the dash ends, if it is heading at us.
+		if (ctx.distance < 10 or ctx.root.CFrame.LookVector:Dot(ctx.offset.Unit) > -0.1) and holdBlock() then
+			entry.holding = true
+			log("front dash: holding block")
+		end
+	elseif Settings.catchFace then
+		startLock(ctx.root)
+	end
+
+	-- Already inside reach: M1 now instead of waiting for the next frame.
+	if kind ~= "FRONT" and Settings.catchSmart then
+		local reach = kind == "BACK" and Settings.bdcReach or Settings.catchReach
+		local autoM1 = (kind == "BACK" and Settings.bdcEnabled) or (kind ~= "BACK" and Settings.catchEnabled)
+		local flat = Vector3.new(ctx.offset.X, 0, ctx.offset.Z).Magnitude
+		local _, myRoot = getMe()
+
+		if autoM1 and myRoot and flat <= reach and not (Settings.counterBait and isCountering(ctx.character)) then
+			entry.fired = true
+			updateLock(myRoot, true)
+			clickM1(string.format("%s dash d=%d (instant)", kind, flat))
+		end
+	end
+end
+
+---Run the dash timing, visuals and auto M1 every frame.
+local function updateDashes()
+	local _, myRoot = getMe()
+	if not myRoot then
+		for track in pairs(dashes) do
+			untrackDash(track, true)
+		end
+		return
+	end
+
+	-- Lead the M1 by half the ping so it lands on time.
+	local lead = Settings.catchPing and (effectivePing() / 2000) or 0
+
+	for track, entry in pairs(dashes) do
+		local distance = (entry.root.Position - myRoot.Position).Magnitude
+		local elapsed = os.clock() - entry.startedAt + entry.t0
+		local ended = not entry.root.Parent or trackEnded(track, elapsed)
+		if ended or distance > entry.range * 1.5 then
+			if ended and elapsed < 0.1 then
+				log("dash track ended instantly; IsPlaying may be unreliable")
+			end
+			untrackDash(track, not ended)
+			continue
+		end
+
+		if entry.kind == "FRONT" then
+			if entry.holding then
+				blockHoldUntil = os.clock() + 0.2
+
+				-- Max hold of 0 means hold until the dash ends.
+				if Settings.frontMaxHold > 0 and elapsed > Settings.frontMaxHold then
+					entry.holding = false
+					releaseBlock()
+				end
+			end
+			continue
+		end
+
+		local reach = entry.kind == "BACK" and Settings.bdcReach or Settings.catchReach
+		local flatOffset = (entry.root.Position - myRoot.Position) * Vector3.new(1, 0, 1)
+		local flatDistance = flatOffset.Magnitude
+
+		-- Estimate how fast they are moving. Other players only update a few times
+		-- a second, so measure over a short window instead of frame to frame.
+		local now = os.clock()
+		local history = entry.history
+		if not history then
+			history = {}
+			entry.history = history
+		end
+
+		table.insert(history, { t = now, position = entry.root.Position })
+		while #history > 2 and now - history[1].t > 0.18 do
+			table.remove(history, 1)
+		end
+
+		local velocity = Vector3.zero
+		local oldest = history[1]
+		if oldest and now - oldest.t >= 0.04 then
+			velocity = (entry.root.Position - oldest.position) / (now - oldest.t)
+		end
+
+		local reported = entry.root.AssemblyLinearVelocity
+		if reported.Magnitude > velocity.Magnitude then
+			velocity = reported
+		end
+
+		local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+		entry.peakSpeed = math.max(entry.peakSpeed or 0, flatVelocity.Magnitude)
+
+		-- Before their speed is measured, assume the dash goes the way the animation says.
+		if flatVelocity.Magnitude < 8 and elapsed < 0.3 then
+			local cframe = entry.root.CFrame
+			local direction = nil
+			if entry.kind == "RIGHT" then
+				direction = cframe.RightVector
+			elseif entry.kind == "LEFT" then
+				direction = -cframe.RightVector
+			elseif entry.kind == "BACK" then
+				direction = -cframe.LookVector
+			end
+
+			local flatDirection = direction and Vector3.new(direction.X, 0, direction.Z)
+			if flatDirection and flatDirection.Magnitude > 0.1 then
+				velocity = flatDirection.Unit * (dashSpeeds[entry.kind] or Settings.catchSpeed)
+			end
+		end
+
+		-- The animation we see is half a ping old and our M1 takes half a ping to
+		-- arrive, so look a full ping ahead, plus the M1's own startup (the offset).
+		local lookahead = (Settings.catchPing and effectivePing() / 1000 or 0) + Settings.catchOffset
+		local relativeVelocity = (velocity - myRoot.AssemblyLinearVelocity) * Vector3.new(1, 0, 1)
+
+		-- A dash stops, so never predict movement past its end.
+		local duration = track.Length > 0 and track.Length or 0.4
+		local travel = math.min(lookahead, math.max(duration - elapsed, 0))
+		local predictedDistance = (flatOffset + relativeVelocity * travel).Magnitude
+
+		-- Side dash prediction for blocking: work out the closest they will come
+		-- along the dash, and have block up before they get there. Auto M1 catch
+		-- handles side dashes itself when it is on.
+		if Settings.dashPredict and (entry.kind == "RIGHT" or entry.kind == "LEFT") and not entry.predicted and not Settings.catchEnabled and flatDistance <= Settings.predictRange then
+			local remainingDash = math.max(duration - elapsed, 0)
+			local path = relativeVelocity * remainingDash
+			local pathLength = path.Magnitude
+			local closestAlong = pathLength > 0.1 and math.clamp(-flatOffset:Dot(path) / (pathLength * pathLength), 0, 1) or 0
+			local closest = (flatOffset + path * closestAlong).Magnitude
+
+			if flatDistance <= Settings.predictReach or closest <= Settings.predictReach then
+				entry.predicted = true
+
+				if Settings.blockFace then
+					startLock(entry.root, true)
+					updateLock(myRoot, true)
+				end
+
+				pressBlock(math.max(remainingDash, 0.2) + Settings.predictTail)
+				log(string.format("side dash predicted: block (closest %.1f studs)", closest))
+			end
+		end
+
+		-- How long until the M1 should go out, for the timing card.
+		local closing = flatDistance > 0.1 and -flatOffset:Dot(relativeVelocity) / flatDistance or 0
+		local eta = 0
+		if flatDistance > reach then
+			eta = closing > 1 and math.max((flatDistance - reach) / closing - lookahead, 0) or math.huge
+		end
+
+		local delay, remaining
+		if Settings.catchSmart then
+			if not entry.baseDelay then
+				entry.baseDelay = math.clamp(eta < math.huge and eta + lookahead or 0.3, 0.15, 0.6)
+			end
+
+			delay = entry.baseDelay
+			remaining = eta < math.huge and eta or delay
+		else
+			delay = Settings.catchDelay
+			if entry.kind == "BACK" then
+				delay = Settings.bdcDelay
+			elseif Settings.catchZones then
+				delay = flatDistance <= Settings.catchCloseRange and Settings.catchCloseDelay or Settings.catchFarDelay
+			end
+
+			remaining = delay - elapsed
+		end
+		entry.delay = delay
+		entry.countering = Settings.counterBait and isCountering(entry.root.Parent)
+
+		if Settings.catchVisual then
+			if not entry.visual then
+				createVisual(entry, myRoot)
+			end
+			updateVisual(entry, remaining, myRoot)
+		else
+			destroyVisual(entry)
+		end
+
+		-- Smart timing fires as soon as they are, or will be when the M1 lands,
+		-- inside hit reach. A target already inside reach gets hit at once.
+		local autoM1 = (entry.kind == "BACK" and Settings.bdcEnabled) or (entry.kind ~= "BACK" and Settings.catchEnabled)
+		local timeOk = Settings.catchSmart or remaining <= lead
+		local inReach = flatDistance <= reach or predictedDistance <= reach
+		if autoM1 and not entry.fired and not entry.countering and timeOk and inReach then
+			entry.fired = true
+			updateLock(myRoot, true)
+			clickM1(string.format("%s dash d=%d", entry.kind, flatDistance))
+		end
+	end
+end
+
+---Store when in a move we got hit, and whether it went through our block.
+---@param id string
+---@param hitTime number
+---@param pierced boolean
+local function learnMove(id, hitTime, pierced)
+	local data = moveData[id]
+	if not data then
+		data = { hits = 0, pierce = 0 }
+		moveData[id] = data
+	end
+
+	data.hit = data.hit and (data.hit * 0.7 + hitTime * 0.3) or hitTime
+	data.hits += 1
+	if pierced then
+		data.pierce += 1
+	end
+end
+
+---Attribute damage we take to the nearest recent move and learn from it.
+---@param health number
+local function onHealthChanged(health)
+	local drop = lastHealth - health
+	lastHealth = health
+	if drop < 0.5 then
+		return
+	end
+
+	local bestEntry
+	for _, entry in pairs(moves) do
+		if entry.near and (not bestEntry or entry.startedAt > bestEntry.startedAt) then
+			bestEntry = entry
+		end
+	end
+
+	if not bestEntry then
+		return
+	end
+
+	local elapsed = os.clock() - bestEntry.startedAt + bestEntry.t0
+	if elapsed < 0.03 then
+		return
+	end
+
+	learnMove(bestEntry.id, elapsed, os.clock() < blockHoldUntil)
+	bestEntry.hitUs = true
+end
+
+---Follow the current character's humanoid for damage learning.
+---@param humanoid Humanoid
+local function bindHealth(humanoid)
+	if humanoid == boundHumanoid then
+		return
+	end
+
+	boundHumanoid = humanoid
+	lastHealth = humanoid.Health
+	connect(humanoid.HealthChanged, onHealthChanged)
+end
+
+---Register an enemy attack animation and start any move-specific reaction.
+---@param ctx table
+local function onThreatTrack(ctx)
+	local humanoid = ctx.humanoid
+	local now = os.clock()
+
+	-- Hit reactions look like attacks, so skip enemies that were just hit,
+	-- are ragdolled, or reacting to our own attack.
+	local reason = nil
+	if now < ownActionUntil then
+		reason = "our own attack"
+	elseif now - (enemyHurtAt[humanoid] or 0) < 0.3 then
+		reason = "just hurt"
+	elseif ctx.character:FindFirstChild("Ragdoll") then
+		reason = "ragdolled"
+	end
+
+	if reason then
+		log(string.format("%s %s ignored (%s)", ctx.character.Name, ctx.kind, reason))
+		labEvent("IGNORED", { reason = reason })
+		return
+	end
+
+	-- Enemies facing away are not swinging at us.
+	local facing = not Settings.faceCheck or ctx.distance < 8 or ctx.root.CFrame.LookVector:Dot(ctx.offset.Unit) >= -0.1
+
+	-- Our own view cone: 360 blocks attackers from every direction.
+	local _, myRoot = getMe()
+	if facing and myRoot and Settings.blockFov < 359 then
+		local toEnemy = Vector3.new(-ctx.offset.X, 0, -ctx.offset.Z)
+		local ourLook = Vector3.new(myRoot.CFrame.LookVector.X, 0, myRoot.CFrame.LookVector.Z)
+		if toEnemy.Magnitude > 0.1 and ourLook.Magnitude > 0.1 then
+			local angle = math.deg(math.acos(math.clamp(ourLook.Unit:Dot(toEnemy.Unit), -1, 1)))
+			facing = angle <= Settings.blockFov / 2
+		end
+	end
+
+	local entry = {
+		id = ctx.id or "0",
+		kind = ctx.kind,
+		root = ctx.root,
+		startedAt = now,
+		t0 = ctx.t0,
+		length = ctx.track.Length,
+		near = ctx.distance <= Settings.blockRange + 6,
+		threat = ctx.distance <= Settings.blockRange and facing and (ctx.kind ~= "SHOVE" or Settings.blockShove),
+		handled = false,
+	}
+	local previous = moves[ctx.track]
+	if previous and previous.holding then
+		previous.holding = false
+		releaseBlock()
+	end
+	moves[ctx.track] = entry
+	labEvent("THREAT", { threat = entry.threat, distance = ctx.distance })
+
+	if ctx.kind == "BARRAGE" and Settings.consecBlock and ctx.distance <= Settings.consecRange then
+		if math.random() * 100 < Settings.consecChance and holdBlock() then
+			entry.holding = true
+			entry.handled = true
+			log("consec: holding block")
+		end
+	elseif ctx.kind == "SHOVE" and Settings.shoveM1 and ctx.distance <= Settings.shoveRange then
+		local targetRoot = ctx.root
+		log("shove seen: M1 queued")
+		task.delay(Settings.shoveDelay, function()
+			local _, myRoot = getMe()
+			if myRoot and targetRoot.Parent then
+				startLock(targetRoot, true)
+				updateLock(myRoot, true)
+				clickM1("shove")
+			end
+		end)
+	end
+end
+
+---Block or evade due attacks and release finished holds.
+local function updateThreats()
+	local _, _, myHumanoid = getMe()
+	if myHumanoid then
+		bindHealth(myHumanoid)
+	end
+
+	-- Lead the reaction by our setting plus half the ping.
+	local lead = Settings.blockLead + effectivePing() / 2000
+
+	for track, entry in pairs(moves) do
+		local elapsed = os.clock() - entry.startedAt + entry.t0
+
+		if not entry.root.Parent or trackEnded(track, elapsed) then
+			if entry.holding then
+				entry.holding = false
+				releaseBlock()
+			end
+
+			if entry.root.Parent and not entry.hitUs then
+				lastMoveEnd[entry.root] = os.clock()
+			end
+			moves[track] = nil
+			continue
+		end
+
+		if entry.holding then
+			blockHoldUntil = os.clock() + 0.2
+			if elapsed > 4 then
+				entry.holding = false
+				releaseBlock()
+			end
+		end
+
+		if entry.threat and not entry.handled then
+			local data = moveData[entry.id]
+			local hitTime = Settings.adaptiveBlock and data and data.hit
+
+			if not hitTime or elapsed >= hitTime - lead then
+				entry.handled = true
+
+				-- Consec moves get dodged when evasive covers them.
+				local evaded = false
+				if Settings.autoEvasive and Settings.evasiveMode ~= "Ragdoll" and entry.kind == "BARRAGE" then
+					evaded = pressEvasive()
+				end
+
+				if not evaded and Settings.autoBlock then
+					-- Face the attacker so the block covers the hit.
+					if Settings.blockFace and entry.root.Parent then
+						local _, myRoot = getMe()
+						if myRoot then
+							startLock(entry.root, true)
+							updateLock(myRoot, true)
+						end
+					end
+
+					-- Hold through the whole move so a late hit frame is still blocked.
+					local duration = Settings.blockHold
+					if hitTime then
+						duration = math.max(hitTime - elapsed + 0.3, Settings.blockHold)
+					elseif Settings.blockFull then
+						duration = math.clamp((entry.length or 0.5) - elapsed + 0.1, Settings.blockHold, 1.4)
+					end
+
+					pressBlock(duration + Settings.blockTail)
+				end
+			end
+		end
+	end
+end
+
+---Hold block while an enemy is close and facing us, so the first hit is blocked.
+local function updatePreBlock()
+	if not Settings.preBlock then
+		return
+	end
+
+	local myCharacter, myRoot = getMe()
+	local now = os.clock()
+	if not myRoot or now < ownActionUntil then
+		return
+	end
+
+	local container = workspace:FindFirstChild("Live") or workspace
+	for _, character in ipairs(container:GetChildren()) do
+		if character == myCharacter or not character:IsA("Model") or isIgnored(character) then
+			continue
+		end
+
+		local root = character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if not (root and humanoid and humanoid.Health > 0) or character:FindFirstChild("Ragdoll") then
+			continue
+		end
+
+		local offset = myRoot.Position - root.Position
+		if offset.Magnitude <= Settings.preBlockRange and offset.Magnitude > 0 and root.CFrame.LookVector:Dot(offset.Unit) > 0.3 then
+			requestBlock(0.2)
+			return
+		end
+	end
+end
+
+---Turn the camera to a yaw while keeping its pitch.
+---@param yaw number
+local function setCameraYaw(yaw)
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+
+	local pitch = math.asin(math.clamp(camera.CFrame.LookVector.Y, -1, 1))
+	camera.CFrame = CFrame.new(camera.CFrame.Position) * CFrame.Angles(0, yaw, 0) * CFrame.Angles(pitch, 0, 0)
+end
+
+---Run one flick-angle dash around a target.
+---@param myRoot BasePart
+---@param targetRoot BasePart
+local function runTech(myRoot, targetRoot)
+	techBusy = true
+
+	local humanoid = myRoot.Parent and myRoot.Parent:FindFirstChildOfClass("Humanoid")
+	local autoRotate = humanoid and humanoid.AutoRotate
+	if humanoid then
+		humanoid.AutoRotate = false
+	end
+
+	---Face the target rotated by an angle in degrees.
+	---@param angle number
+	local function flick(angle)
+		if not (myRoot.Parent and targetRoot.Parent) then
+			return
+		end
+
+		local direction = (targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)
+		if direction.Magnitude < 0.1 then
+			return
+		end
+
+		local yaw = math.atan2(-direction.X, -direction.Z) + math.rad(angle)
+		myRoot.CFrame = CFrame.new(myRoot.Position) * CFrame.Angles(0, yaw, 0)
+		if Settings.techCamera then
+			setCameraYaw(yaw)
+		end
+	end
+
+	pcall(function()
+		flick(Settings.techStart)
+
+		local remote = getRemote()
+		if remote then
+			remote:FireServer(FRONT_DASH)
+		end
+
+		if Settings.techJump and humanoid then
+			humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+
+		task.wait(Settings.techSecondDelay)
+		flick(Settings.techSecond)
+
+		task.wait(math.max(Settings.techThirdDelay - Settings.techSecondDelay, 0))
+		flick(Settings.techThird)
+	end)
+
+	if humanoid and humanoid.Parent and autoRotate ~= nil then
+		humanoid.AutoRotate = autoRotate
+	end
+
+	techBusy = false
+end
+
+---Find the closest living enemy inside a stud range.
+---@param myRoot BasePart
+---@param range number
+---@return BasePart?
+local function getNearestTarget(myRoot, range)
+	local targetRoot, closest = nil, range
+	local container = workspace:FindFirstChild("Live") or workspace
+
+	for _, character in ipairs(container:GetChildren()) do
+		if character == myRoot.Parent or not character:IsA("Model") or isIgnored(character) then
+			continue
+		end
+
+		local root = character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if not (root and humanoid and humanoid.Health > 0) then
+			continue
+		end
+
+		local distance = (root.Position - myRoot.Position).Magnitude
+		if distance <= closest then
+			targetRoot, closest = root, distance
+		end
+	end
+
+	return targetRoot
+end
+
+---Start the tech dash after our own uppercut.
+---@param myRoot BasePart
+local function triggerTech(myRoot)
+	local targetRoot = getNearestTarget(myRoot, Settings.techRange)
+	if not targetRoot then
+		log("tech: no target in range")
+		return
+	end
+
+	techBusy = true
+	log("tech: uppercut seen, starting")
+	task.spawn(function()
+		task.wait(Settings.techStartDelay)
+
+		-- Wait for the front dash to come back, but not forever.
+		local deadline = os.clock() + 1
+		while isOnCooldown("forward") and os.clock() < deadline do
+			task.wait()
+		end
+
+		if not (myRoot.Parent and targetRoot.Parent) then
+			techBusy = false
+			return
+		end
+
+		runTech(myRoot, targetRoot)
+	end)
+end
+
+---Handle one of our own animation tracks: grace window, learning and tech trigger.
+---@param track AnimationTrack
+---@param fromEvent boolean
+local function onOwnTrack(track, fromEvent)
+	if not isNewPlay(ownSeen, ownTime, track, fromEvent) then
+		return
+	end
+
+	local id = getTrackId(track)
+
+	-- Learn mode: our own next move becomes the chosen move.
+	if learning then
+		-- Dashes use any one-shot animation; moves need an action priority.
+		local broad = learning == "back" or learning == "front"
+		local priority = track.Priority
+		local accepted = id
+			and (
+				ACTION_PRIORITIES[priority]
+				or (broad and not track.Looped and track.Length > 0.1 and priority ~= Enum.AnimationPriority.Core and priority ~= Enum.AnimationPriority.Idle)
+			)
+
+		if accepted then
+			learned[learning][id] = true
+			log(string.format("learned %s = %s (%s)", learning, id, track.Name))
+
+			-- The M1 string keeps learning for a few seconds to catch every swing.
+			if learning ~= "m1" then
+				learning = nil
+			end
+		elseif fromEvent then
+			log(string.format("learn: skipped %s (priority %s)", track.Name, tostring(track.Priority)))
+		end
+		return
+	end
+
+	if not ACTION_PRIORITIES[track.Priority] then
+		return
+	end
+
+	ownActionUntil = os.clock() + Settings.selfGrace
+
+	local isUppercut = id and (UPPERCUT_IDS[id] or learned.uppercut[id]) or track.Name:lower():find("uppercut", 1, true)
+	if Settings.techLoop and not techBusy and isUppercut then
+		local _, myRoot = getMe()
+		if myRoot then
+			triggerTech(myRoot)
+		end
+	end
+end
+
+---Hook and poll our own animator.
+local function scanOwn()
+	local _, _, humanoid = getMe()
+	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+	if not animator then
+		return
+	end
+
+	if not watched[animator] then
+		watched[animator] = true
+		connect(animator.AnimationPlayed, function(track)
+			onOwnTrack(track, true)
+		end)
+	end
+
+	for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+		onOwnTrack(track, false)
+	end
+end
+
+---Work out what an enemy animation is.
+---@param track AnimationTrack
+---@param id string?
+---@return string?
+local function classify(track, id)
+	if id then
+		if DASH_TYPES[id] then
+			return DASH_TYPES[id]
+		end
+
+		if learned.back[id] then
+			return "BACK"
+		end
+
+		if learned.front[id] then
+			return "FRONT"
+		end
+
+		if UPPERCUT_IDS[id] or learned.uppercut[id] then
+			return "UPPERCUT"
+		end
+
+		if learned.barrage[id] or SEED_IDS.barrage[id] then
+			return "BARRAGE"
+		end
+
+		if learned.shove[id] or SEED_IDS.shove[id] then
+			return "SHOVE"
+		end
+
+		if learned.m1[id] then
+			return "ATTACK"
+		end
+	end
+
+	local name = track.Name:lower()
+	if name:find("consecutive", 1, true) or name:find("barrage", 1, true) or name:find("machine gun", 1, true) then
+		return "BARRAGE"
+	end
+
+	if name:find("shove", 1, true) then
+		return "SHOVE"
+	end
+
+	-- Broad detection counts any one-shot move; walking and idling loop.
+	if Settings.broadDetect then
+		local priority = track.Priority
+		if not track.Looped and track.Length > 0.1 and priority ~= Enum.AnimationPriority.Core and priority ~= Enum.AnimationPriority.Idle then
+			return "ATTACK"
+		end
+	elseif ACTION_PRIORITIES[track.Priority] then
+		return "ATTACK"
+	end
+
+	return nil
+end
+
+---Handle one enemy animation track.
+---@param character Model
+---@param track AnimationTrack
+---@param fromEvent boolean
+local function onEnemyTrack(character, track, fromEvent)
+	if not isNewPlay(seenTracks, lastTime, track, fromEvent) then
+		return
+	end
+
+	local _, myRoot = getMe()
+	local root = character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not (myRoot and root and humanoid and humanoid.Health > 0) then
+		return
+	end
+
+	if isIgnored(character) then
+		return
+	end
+
+	for _, name in ipairs(ENEMY_IGNORE) do
+		if character:FindFirstChild(name) then
+			return
+		end
+	end
+
+	local id = getTrackId(track)
+	local kind = classify(track, id)
+	if not kind then
+		return
+	end
+
+	local offset = myRoot.Position - root.Position
+	local distance = offset.Magnitude
+	if distance == 0 then
+		return
+	end
+
+	if kind ~= "ATTACK" or distance <= Settings.blockRange + 6 then
+		log(string.format("%s %s id=%s d=%d", character.Name, kind, tostring(id), distance))
+	end
+
+	if labRun and character == labDummy then
+		labEvent("DETECT", { kind = kind, distance = distance })
+	end
+
+	local ctx = {
+		character = character,
+		root = root,
+		humanoid = humanoid,
+		track = track,
+		id = id,
+		kind = kind,
+		offset = offset,
+		distance = distance,
+		t0 = track.TimePosition,
+	}
+
+	if kind == "RIGHT" or kind == "LEFT" or kind == "BACK" or kind == "FRONT" then
+		onDashTrack(ctx)
+	else
+		onThreatTrack(ctx)
+	end
+end
+
+---Check whether any feature needs to watch enemy animations.
+---@return boolean
+local function needsScan()
+	return labRun ~= nil
+		or Settings.autoBlock
+		or Settings.autoEvasive
+		or Settings.adaptiveBlock
+		or Settings.consecBlock
+		or Settings.shoveM1
+		or Settings.catchEnabled
+		or Settings.catchVisual
+		or Settings.catchFace
+		or Settings.bdcEnabled
+		or Settings.frontBlock
+		or Settings.safeIndicator
+		or Settings.counterBait
+		or Settings.counterPunish
+end
+
+---Hook and poll every enemy animator in range.
+local function scanEnemies()
+	local myCharacter, myRoot = getMe()
+	if not myRoot or not needsScan() then
+		return
+	end
+
+	local now = os.clock()
+	local container = workspace:FindFirstChild("Live") or workspace
+
+	for _, character in ipairs(container:GetChildren()) do
+		if character == myCharacter or not character:IsA("Model") then
+			continue
+		end
+
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+		if not animator then
+			continue
+		end
+
+		-- Track recent damage so hit reactions are not mistaken for attacks.
+		local previousHealth = enemyHealth[humanoid]
+		if previousHealth and humanoid.Health < previousHealth - 0.01 then
+			enemyHurtAt[humanoid] = now
+		end
+		enemyHealth[humanoid] = humanoid.Health
+
+		if not watched[animator] then
+			watched[animator] = true
+			connect(animator.AnimationPlayed, function(track)
+				onEnemyTrack(character, track, true)
+			end)
+		end
+
+		for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+			onEnemyTrack(character, track, false)
+		end
+	end
+end
+
+---Remove the esp objects of a player.
+---@param player Player
+local function removeEsp(player)
+	local entry = espObjects[player]
+	if not entry then
+		return
+	end
+
+	entry.highlight:Destroy()
+	entry.billboard:Destroy()
+	espObjects[player] = nil
+end
+
+---Build esp objects for a player's current character.
+---@param player Player
+local function createEsp(player)
+	removeEsp(player)
+
+	local character = player.Character
+	local head = character and character:FindFirstChild("Head")
+	if not head then
+		return
+	end
+
+	local highlight = newInstance("Highlight", {
+		Adornee = character,
+		FillColor = isFriend(character) and COLORS.good or COLORS.accent,
+		FillTransparency = 0.75,
+		OutlineColor = Color3.new(1, 1, 1),
+		DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+	}, holder)
+
+	local billboard = newInstance("BillboardGui", {
+		Adornee = head,
+		Size = UDim2.fromOffset(140, 30),
+		StudsOffset = Vector3.new(0, 2.5, 0),
+		AlwaysOnTop = true,
+	}, holder)
+
+	local label = newInstance("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		TextColor3 = Color3.new(1, 1, 1),
+		TextStrokeTransparency = 0.4,
+		Font = Enum.Font.GothamSemibold,
+		TextSize = 13,
+	}, billboard)
+
+	espObjects[player] = { highlight = highlight, billboard = billboard, label = label, character = character }
+end
+
+---Keep esp objects in sync with the player list.
+local function updateEsp()
+	if not Settings.esp then
+		for player in pairs(espObjects) do
+			removeEsp(player)
+		end
+		return
+	end
+
+	for _, player in ipairs(playersService:GetPlayers()) do
+		if player == localPlayer then
+			continue
+		end
+
+		local entry = espObjects[player]
+		if not entry or entry.character ~= player.Character then
+			createEsp(player)
+			entry = espObjects[player]
+		end
+
+		local humanoid = entry and entry.character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			entry.label.Text = string.format("%s [%d]", player.Name, math.floor(humanoid.Health))
+		end
+	end
+end
+
+---Keep the self chams highlight in sync with the setting.
+local function updateSelfChams()
+	local character = localPlayer.Character
+	if not Settings.selfChams or not character then
+		if selfHighlight then
+			selfHighlight:Destroy()
+			selfHighlight = nil
+		end
+		return
+	end
+
+	if selfHighlight and selfHighlight.Adornee == character then
+		return
+	end
+
+	if selfHighlight then
+		selfHighlight:Destroy()
+	end
+
+	selfHighlight = newInstance("Highlight", {
+		Adornee = character,
+		FillColor = COLORS.accent,
+		FillTransparency = 0.6,
+		OutlineTransparency = 0,
+	}, holder)
+end
+
+---Pause M1s into counters and punish the endlag when a counter ends.
+local function updateCounterBait()
+	if not (Settings.counterBait or Settings.counterPunish) then
+		table.clear(counterSeen)
+		return
+	end
+
+	local myCharacter, myRoot = getMe()
+	if not myRoot then
+		return
+	end
+
+	local container = workspace:FindFirstChild("Live") or workspace
+	for _, character in ipairs(container:GetChildren()) do
+		if character == myCharacter or not character:IsA("Model") or isIgnored(character) then
+			continue
+		end
+
+		local root = character:FindFirstChild("HumanoidRootPart")
+		if not root then
+			continue
+		end
+
+		if (root.Position - myRoot.Position).Magnitude > Settings.catchRange then
+			counterSeen[character] = nil
+			continue
+		end
+
+		if isCountering(character) then
+			counterSeen[character] = true
+		elseif counterSeen[character] then
+			counterSeen[character] = nil
+
+			if Settings.counterPunish then
+				startLock(root, true)
+				task.delay(0.08, function()
+					local _, currentRoot = getMe()
+					if currentRoot and root.Parent then
+						updateLock(currentRoot, true)
+						clickM1("counter punish")
+					end
+				end)
+			end
+		end
+	end
+end
+
+---Work out what state an enemy is in for the safe-to-hit marker.
+---@param character Model
+---@param root BasePart
+---@param humanoid Humanoid
+---@param now number
+---@return string?, Color3?
+local function getSafeState(character, root, humanoid, now)
+	if isCountering(character) then
+		return "COUNTER", COLORS.bad
+	end
+
+	if isBlocking(character) then
+		return "BLOCKING", COLORS.warn
+	end
+
+	if REACTION_STATES[humanoid:GetState()] == true or now - (enemyHurtAt[humanoid] or 0) < 0.5 then
+		return "OPEN", COLORS.good
+	end
+
+	if now - (lastMoveEnd[root] or 0) < 0.6 then
+		return "PUNISH", COLORS.good
+	end
+
+	return nil
+end
+
+---Build a safe-to-hit marker under an enemy.
+---@param root BasePart
+local function createSafeMarker(root)
+	local billboard = newInstance("BillboardGui", {
+		Adornee = root,
+		Size = UDim2.fromOffset(96, 24),
+		StudsOffset = Vector3.new(0, -3.6, 0),
+		AlwaysOnTop = true,
+		Enabled = false,
+	}, holder)
+
+	local card = newInstance("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.fromRGB(8, 14, 10),
+		BackgroundTransparency = 0.25,
+		BorderSizePixel = 0,
+	}, billboard)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, card)
+	local stroke = newInstance("UIStroke", { Color = COLORS.good, Transparency = 0.2, Thickness = 1.5 }, card)
+
+	local label = newInstance("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.good,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+	}, card)
+
+	return { billboard = billboard, stroke = stroke, label = label }
+end
+
+---Show whether it is safe to hit each nearby enemy.
+local function updateSafeIndicator()
+	local character, myRoot = getMe()
+	local seen = {}
+
+	if Settings.safeIndicator and myRoot then
+		local now = os.clock()
+		local container = workspace:FindFirstChild("Live") or workspace
+
+		for _, enemy in ipairs(container:GetChildren()) do
+			if enemy == character or not enemy:IsA("Model") or isIgnored(enemy) then
+				continue
+			end
+
+			local root = enemy:FindFirstChild("HumanoidRootPart")
+			local humanoid = enemy:FindFirstChildOfClass("Humanoid")
+			if not (root and humanoid and humanoid.Health > 0) then
+				continue
+			end
+
+			if (root.Position - myRoot.Position).Magnitude > Settings.safeRange then
+				continue
+			end
+
+			local marker = safeMarkers[enemy]
+			if not marker then
+				marker = createSafeMarker(root)
+				safeMarkers[enemy] = marker
+			end
+			seen[enemy] = true
+
+			local text, color = getSafeState(enemy, root, humanoid, now)
+			marker.billboard.Enabled = text ~= nil
+			if text then
+				marker.label.Text = text
+				marker.label.TextColor3 = color
+				marker.stroke.Color = color
+			end
+		end
+	end
+
+	for enemy, marker in pairs(safeMarkers) do
+		if not seen[enemy] then
+			marker.billboard:Destroy()
+			safeMarkers[enemy] = nil
+		end
+	end
+end
+
+---Build the combo counter pill.
+local function ensureComboHud()
+	if comboHud and comboHud.frame.Parent then
+		return comboHud
+	end
+
+	local frame = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, 12),
+		Size = UDim2.fromOffset(170, 38),
+		BackgroundColor3 = Color3.fromRGB(8, 14, 10),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Visible = false,
+	}, gui)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, frame)
+	local stroke = newInstance("UIStroke", { Color = COLORS.accent, Transparency = 1, Thickness = 1.5 }, frame)
+
+	local label = newInstance("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.text,
+		TextTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 15,
+	}, frame)
+
+	comboHud = { frame = frame, stroke = stroke, label = label }
+	return comboHud
+end
+
+---Count our hits and damage on nearby enemies and show them in a pill.
+local function updateComboCounter()
+	if not Settings.comboCounter then
+		comboHits = 0
+		if comboHud then
+			comboHud.frame.Visible = false
+		end
+		return
+	end
+
+	local character, myRoot = getMe()
+	if not myRoot then
+		return
+	end
+
+	local now = os.clock()
+	local container = workspace:FindFirstChild("Live") or workspace
+	local gained = false
+
+	for _, enemy in ipairs(container:GetChildren()) do
+		local humanoid = enemy ~= character and enemy:IsA("Model") and enemy:FindFirstChildOfClass("Humanoid")
+		local root = humanoid and enemy:FindFirstChild("HumanoidRootPart")
+		if not root then
+			continue
+		end
+
+		local previous = comboHealth[humanoid]
+		comboHealth[humanoid] = humanoid.Health
+
+		-- Damage on a nearby enemy right after one of our own attacks counts as our hit.
+		if previous and humanoid.Health < previous - 0.5 and (root.Position - myRoot.Position).Magnitude <= 30 and now < ownActionUntil + 0.3 then
+			comboHits += 1
+			comboDamage += previous - humanoid.Health
+			comboLastAt = now
+			gained = true
+		end
+	end
+
+	local hud = ensureComboHud()
+
+	if comboHits > 0 and now - comboLastAt > 2 then
+		comboHits, comboDamage = 0, 0
+		tween(hud.frame, { BackgroundTransparency = 1 })
+		tween(hud.stroke, { Transparency = 1 })
+		tween(hud.label, { TextTransparency = 1 })
+		task.delay(0.25, function()
+			if comboHits == 0 then
+				hud.frame.Visible = false
+			end
+		end)
+	elseif gained then
+		hud.frame.Visible = true
+		hud.label.Text = string.format("%d HITS  %d dmg", comboHits, comboDamage)
+		tween(hud.frame, { BackgroundTransparency = 0.25 })
+		tween(hud.stroke, { Transparency = 0.2 })
+		tween(hud.label, { TextTransparency = 0 })
+	end
+end
+
+---Disable smoke and dust emitters as they spawn.
+---@param instance Instance
+local function onDescendantAdded(instance)
+	if not Settings.noSmoke or not instance:IsA("ParticleEmitter") then
+		return
+	end
+
+	local name = instance.Name:lower()
+	if name:find("smoke") or name:find("dust") then
+		instance.Enabled = false
+	end
+end
+
+---Apply settings that need a one-time write when changed.
+---@param key string
+local function onSettingChanged(key)
+	lightingService.GlobalShadows = not Settings.noShadows and originalShadows
+end
+
+---Get the file name for the selected preset slot.
+---@return string
+local function getPresetName()
+	return (Settings.presetSlot:gsub("%s", "_")) .. ".json"
+end
+
+---Save the current settings to the selected slot.
+local function savePreset()
+	local data = {}
+	for key, value in pairs(Settings) do
+		local kind = type(value)
+		if key ~= "presetSlot" and (kind == "number" or kind == "boolean" or kind == "string") then
+			data[key] = value
+		end
+	end
+
+	local encoded = httpService:JSONEncode(data)
+	local name = getPresetName()
+
+	shared.ZennyPresets = shared.ZennyPresets or {}
+	shared.ZennyPresets[name] = encoded
+
+	local saved = false
+	if writefile then
+		saved = pcall(function()
+			if makefolder and isfolder and not isfolder("Zenny") then
+				makefolder("Zenny")
+			end
+			writefile("Zenny/" .. name, encoded)
+		end)
+	end
+
+	presetStatus = string.format("Saved %s%s", Settings.presetSlot, saved and "" or " (memory only)")
+end
+
+---Load settings from the selected slot.
+local function loadPreset()
+	local name = getPresetName()
+	local encoded = shared.ZennyPresets and shared.ZennyPresets[name]
+
+	if readfile and isfile then
+		pcall(function()
+			if isfile("Zenny/" .. name) then
+				encoded = readfile("Zenny/" .. name)
+			end
+		end)
+	end
+
+	if not encoded then
+		presetStatus = string.format("%s is empty", Settings.presetSlot)
+		return
+	end
+
+	local ok, data = pcall(function()
+		return httpService:JSONDecode(encoded)
+	end)
+	if not ok or type(data) ~= "table" then
+		presetStatus = "Could not read " .. Settings.presetSlot
+		return
+	end
+
+	for key, value in pairs(data) do
+		if key ~= "presetSlot" and type(Settings[key]) == type(value) then
+			Settings[key] = value
+			local refresh = uiRefreshers[key]
+			if refresh then
+				refresh(true)
+			end
+		end
+	end
+
+	onSettingChanged("preset")
+	presetStatus = "Loaded " .. Settings.presetSlot
+end
+
+---Log every remote under our character to help find the input remote.
+local function scanRemotes()
+	local character = localPlayer.Character
+	if not character then
+		log("scan: no character")
+		return
+	end
+
+	local count = 0
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("RemoteEvent") or descendant:IsA("RemoteFunction") then
+			count += 1
+			log(string.format("remote: %s (%s) in %s", descendant.Name, descendant.ClassName, descendant.Parent.Name))
+		end
+	end
+
+	log(string.format("scan: %d remotes, input remote %s", count, getRemote() and "FOUND" or "MISSING"))
+end
+
+---Log every visible button in the player gui to help find the M1 button.
+local function scanButtons()
+	local count = 0
+	for _, descendant in ipairs(playerGui:GetDescendants()) do
+		if descendant:IsA("GuiButton") and descendant.Visible and count < 40 then
+			count += 1
+			local text = descendant:IsA("TextButton") and descendant.Text or ""
+			log(string.format("button: %s / %s %s", descendant.Parent and descendant.Parent.Name or "?", descendant.Name, text ~= "" and ("'" .. text .. "'") or ""))
+		end
+	end
+
+	log(string.format("scan: %d buttons shown, M1 button %s", count, findM1Button() and findM1Button().Name or "none"))
+end
+
+---Try each M1 method one after another so you can see which one punches.
+local function testAllM1()
+	task.spawn(function()
+		for index, method in ipairs({ "Remote+Mobile", "Remote", "Signal", "Button" }) do
+			log(string.format("TEST %d/4: %s", index, method))
+			sendM1(method, "test")
+			task.wait(1.5)
+		end
+
+		log("TEST done: tell me which number punched")
+	end)
+end
+
+-- Combat lab.
+local LAB_DASH_TIME = 0.4
+local LAB_FRONT_LAG = 0.12
+local LAB_TEST_NAMES = {
+	"Side Dash In",
+	"Side Dash Away",
+	"Block: Side Dash",
+	"Backdash",
+	"Front Dash",
+	"Block: Uppercut",
+	"Block: Consec",
+	"Block: Shove",
+	"Block: M1 String",
+}
+local LAB_TESTS = {
+	["Side Dash In"] = { type = "dash", kind = "LEFT" },
+	["Side Dash Away"] = { type = "dash", kind = "RIGHT" },
+	["Block: Side Dash"] = { type = "dash", kind = "LEFT", block = true },
+	["Backdash"] = { type = "dash", kind = "BACK" },
+	["Front Dash"] = { type = "dash", kind = "FRONT" },
+	["Block: Uppercut"] = { type = "attack" },
+	["Block: Consec"] = { type = "attack" },
+	["Block: Shove"] = { type = "attack" },
+	["Block: M1 String"] = { type = "string" },
+}
+
+local labRunning = false
+local labResultCallback = nil
+local labHistory = {}
+
+---Keep only the flat part of a vector and normalize it.
+---@param vector Vector3
+---@return Vector3
+local function flatten(vector)
+	local flat = Vector3.new(vector.X, 0, vector.Z)
+	return flat.Magnitude > 0 and flat.Unit or Vector3.new(0, 0, -1)
+end
+
+---Pick the animation id for a dash kind, preferring a learned one.
+---@param kind string
+---@return string?
+local function getDashAnimationId(kind)
+	if kind == "BACK" and next(learned.back) then
+		return (next(learned.back))
+	end
+
+	if kind == "FRONT" and next(learned.front) then
+		return (next(learned.front))
+	end
+
+	for id, dashKind in pairs(DASH_TYPES) do
+		if dashKind == kind then
+			return id
+		end
+	end
+
+	return nil
+end
+
+---Get the animation ids a block test plays.
+---@param testName string
+---@return table
+local function getAttackIds(testName)
+	if testName == "Block: Uppercut" then
+		return { "10503381238" }
+	end
+
+	if testName == "Block: Consec" then
+		local id = next(learned.barrage) or next(SEED_IDS.barrage)
+		return id and { id } or {}
+	end
+
+	if testName == "Block: Shove" then
+		local id = next(learned.shove) or next(SEED_IDS.shove)
+		return id and { id } or {}
+	end
+
+	local ids = {}
+	for id in pairs(learned.m1) do
+		table.insert(ids, id)
+	end
+	table.sort(ids)
+
+	return ids
+end
+
+---Copy our character into a script-free practice target.
+---@return Model?
+local function getLabDummy()
+	if labDummy and labDummy.Parent then
+		return labDummy
+	end
+
+	local character = localPlayer.Character
+	if not character then
+		return nil
+	end
+
+	local archivable = character.Archivable
+	character.Archivable = true
+	local clone = character:Clone()
+	character.Archivable = archivable
+	if not clone then
+		return nil
+	end
+
+	for _, descendant in ipairs(clone:GetDescendants()) do
+		if descendant:IsA("Script") or descendant:IsA("LocalScript") then
+			descendant:Destroy()
+		elseif descendant:IsA("BasePart") then
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+		end
+	end
+
+	local humanoid = clone:FindFirstChildOfClass("Humanoid")
+	local root = clone:FindFirstChild("HumanoidRootPart")
+	if not (humanoid and root) then
+		clone:Destroy()
+		return nil
+	end
+
+	clone.Name = "ZennyDummy"
+	humanoid.WalkSpeed = 0
+	humanoid.AutoRotate = false
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	humanoid.Health = humanoid.MaxHealth
+	if not humanoid:FindFirstChildOfClass("Animator") then
+		newInstance("Animator", {}, humanoid)
+	end
+
+	labDummy = clone
+	return clone
+end
+
+---Remove the practice target.
+local function removeLabDummy()
+	if labDummy then
+		labDummy:Destroy()
+		labDummy = nil
+	end
+end
+
+---Play an animation id on the practice target.
+---@param animator Animator
+---@param id string
+---@return AnimationTrack?
+local function playLabTrack(animator, id)
+	local animation = newInstance("Animation", { AnimationId = "rbxassetid://" .. id }, nil)
+	local ok, track = pcall(function()
+		return animator:LoadAnimation(animation)
+	end)
+	if not ok or not track then
+		return nil
+	end
+
+	track:Play(0.05)
+	return track
+end
+
+---Get the distance at a time by looking through the recorded samples.
+---@param samples table
+---@param time number
+---@return number
+local function distanceAt(samples, time)
+	local last = math.huge
+	for _, sample in ipairs(samples) do
+		last = sample.distance
+		if sample.t >= time then
+			return sample.distance
+		end
+	end
+
+	return last
+end
+
+---Turn block events into intervals in lab time.
+---@param events table
+---@param total number
+---@return table
+local function buildIntervals(events, total)
+	local intervals, open = {}, nil
+	for _, event in ipairs(events) do
+		if event.name == "BLOCK" then
+			table.insert(intervals, { from = event.t, to = event.t + (event.data.duration or 0.3) })
+		elseif event.name == "HOLD" then
+			open = event.t
+		elseif event.name == "RELEASE" and open then
+			table.insert(intervals, { from = open, to = event.t })
+			open = nil
+		end
+	end
+
+	if open then
+		table.insert(intervals, { from = open, to = total })
+	end
+
+	return intervals
+end
+
+---Check whether a block covers a hit once the ping delay is applied.
+---@param intervals table
+---@param hitTime number
+---@param ping number
+---@return string, number
+local function checkCoverage(intervals, hitTime, ping)
+	if #intervals == 0 then
+		return "NONE", 0
+	end
+
+	local state, gap = "LATE", math.huge
+	for _, interval in ipairs(intervals) do
+		local lands, ends = interval.from + ping, interval.to + ping
+		if lands <= hitTime and ends >= hitTime then
+			return "BLOCKED", math.min(hitTime - lands, ends - hitTime)
+		end
+
+		if lands > hitTime and lands - hitTime < gap then
+			state, gap = "LATE", lands - hitTime
+		elseif ends < hitTime and hitTime - ends < gap then
+			state, gap = "EARLY", hitTime - ends
+		end
+	end
+
+	return state, gap
+end
+
+---Explain why nothing happened, from the events that were recorded.
+---@param events table
+---@return string
+local function explainMiss(events)
+	local detected, threat, ignored = false, nil, nil
+	for _, event in ipairs(events) do
+		if event.name == "DETECT" then
+			detected = true
+		elseif event.name == "THREAT" then
+			threat = event.data
+		elseif event.name == "IGNORED" then
+			ignored = event.data.reason
+		end
+	end
+
+	if ignored then
+		return "Detected but ignored (" .. ignored .. ")."
+	end
+
+	if not detected then
+		return "Zenny never detected the animation. Learn it first, or check Broad Detection."
+	end
+
+	if threat and not threat.threat then
+		return string.format("Detected at %d studs but not counted as a threat (range or facing).", threat.distance)
+	end
+
+	return "Detected, but no action was taken."
+end
+
+---Score a dash catch test.
+---@param run table
+---@param test table
+---@param distance number
+---@return table
+local function evaluateDash(run, test, distance)
+	local ping = Settings.labPing / 1000
+	local startup = Settings.labStartup
+	local reach = Settings.labReach
+	local m1Event
+	for _, event in ipairs(run.events) do
+		if event.name == "M1" then
+			m1Event = event
+			break
+		end
+	end
+
+	local windowStart, windowEnd
+	for _, sample in ipairs(run.samples) do
+		if sample.distance <= reach then
+			windowStart = windowStart or sample.t
+			windowEnd = sample.t
+		end
+	end
+
+	local timeline = {
+		total = 1,
+		bars = { { from = 0, to = LAB_DASH_TIME, lane = 0, color = COLORS.accentDark } },
+		ticks = {},
+	}
+	if windowStart then
+		table.insert(timeline.bars, { from = windowStart, to = windowEnd, lane = 1, color = COLORS.good })
+	end
+
+	local result = { lines = {}, timeline = timeline }
+	local enabled = test.kind == "BACK" and Settings.bdcEnabled or Settings.catchEnabled
+
+	if windowStart then
+		table.insert(
+			result.lines,
+			string.format("Best M1 window: %d to %d ms", math.max(windowStart - ping - startup, 0) * 1000, math.max(windowEnd - ping - startup, 0) * 1000)
+		)
+	else
+		table.insert(result.lines, string.format("They never got within %g studs of you.", reach))
+	end
+
+	if not m1Event then
+		result.ok = false
+		result.title = "NO M1"
+		table.insert(result.lines, 1, enabled and explainMiss(run.events) or "Auto M1 for this dash is turned off.")
+		return result
+	end
+
+	local landing = m1Event.t + ping + startup
+	local landed = distanceAt(run.samples, landing)
+	result.ok = landed <= reach
+	result.title = result.ok and "HIT" or "WHIFF"
+	table.insert(timeline.ticks, { at = landing, color = result.ok and COLORS.good or COLORS.bad })
+	table.insert(result.lines, 1, string.format("M1 fired %d ms in and landed %.1f studs away (reach %g).", m1Event.t * 1000, landed, reach))
+
+	if not result.ok then
+		table.insert(result.lines, landed > reach and "Too far: raise Hit Reach or lower the delay." or "")
+	end
+
+	return result
+end
+
+---Score a front dash block test.
+---@param run table
+---@return table
+local function evaluateFront(run)
+	local ping = Settings.labPing / 1000
+	local hitTime = LAB_DASH_TIME + LAB_FRONT_LAG
+	local intervals = buildIntervals(run.events, 1)
+	local state, gap = checkCoverage(intervals, hitTime, ping)
+
+	local timeline = {
+		total = 1,
+		bars = { { from = 0, to = LAB_DASH_TIME, lane = 0, color = COLORS.accentDark } },
+		ticks = { { at = hitTime, color = COLORS.bad } },
+	}
+	for _, interval in ipairs(intervals) do
+		table.insert(timeline.bars, { from = interval.from + ping, to = interval.to + ping, lane = 1, color = COLORS.accent })
+	end
+
+	local result = { lines = {}, timeline = timeline }
+	result.ok = state == "BLOCKED"
+
+	if state == "BLOCKED" then
+		result.title = "BLOCKED"
+		table.insert(result.lines, string.format("A hit %d ms after the dash ended was covered by %d ms.", LAB_FRONT_LAG * 1000, gap * 1000))
+	elseif state == "NONE" then
+		result.title = "NO BLOCK"
+		table.insert(result.lines, Settings.frontBlock and explainMiss(run.events) or "Front Dash Block is turned off.")
+	elseif state == "LATE" then
+		result.title = "TOO LATE"
+		table.insert(result.lines, string.format("Block landed %d ms after the hit.", gap * 1000))
+	else
+		result.title = "RELEASED EARLY"
+		table.insert(result.lines, string.format("Block ended %d ms before the hit: raise Chain Tail.", gap * 1000))
+	end
+
+	return result
+end
+
+---Score the side dash block test: a hit lands shortly after they arrive.
+---@param run table
+---@return table
+local function evaluateSideBlock(run)
+	local ping = Settings.labPing / 1000
+	local arrival
+	for _, sample in ipairs(run.samples) do
+		if sample.distance <= Settings.labReach then
+			arrival = sample.t
+			break
+		end
+	end
+
+	if not arrival then
+		return { ok = false, title = "NO ARRIVAL", lines = { "They never came within hit reach, so nothing would hit you." } }
+	end
+
+	local hitTime = arrival + 0.12
+	local intervals = buildIntervals(run.events, hitTime + 0.6)
+	local state, gap = checkCoverage(intervals, hitTime, ping)
+
+	local timeline = {
+		total = 1,
+		bars = { { from = 0, to = LAB_DASH_TIME, lane = 0, color = COLORS.accentDark } },
+		ticks = { { at = hitTime, color = COLORS.bad } },
+	}
+	for _, interval in ipairs(intervals) do
+		table.insert(timeline.bars, { from = interval.from + ping, to = interval.to + ping, lane = 1, color = COLORS.accent })
+	end
+
+	local result = { lines = {}, timeline = timeline, ok = state == "BLOCKED" }
+	if state == "BLOCKED" then
+		result.title = "BLOCKED"
+		table.insert(result.lines, string.format("A hit %d ms after they arrived was covered by %d ms.", 120, gap * 1000))
+	elseif state == "NONE" then
+		result.title = "NO BLOCK"
+		local reason = "Side Dash Block is turned off."
+		if Settings.dashPredict then
+			reason = Settings.catchEnabled and "Auto M1 catch is on, which handles side dashes instead of blocking." or explainMiss(run.events)
+		end
+		table.insert(result.lines, reason)
+	elseif state == "LATE" then
+		result.title = "TOO LATE"
+		table.insert(result.lines, string.format("Block landed %d ms after the hit.", gap * 1000))
+	else
+		result.title = "RELEASED EARLY"
+		table.insert(result.lines, string.format("Block ended %d ms before the hit: raise Block After.", gap * 1000))
+	end
+
+	return result
+end
+
+---Score a block test against one or more hits.
+---@param run table
+---@param hits table
+---@return table
+local function evaluateBlock(run, hits)
+	local ping = Settings.labPing / 1000
+	local total = hits[#hits] + 0.6
+	local intervals = buildIntervals(run.events, total)
+
+	local timeline = { total = total, bars = {}, ticks = {} }
+	for _, interval in ipairs(intervals) do
+		table.insert(timeline.bars, { from = interval.from + ping, to = interval.to + ping, lane = 1, color = COLORS.accent })
+	end
+
+	local result = { lines = {}, timeline = timeline }
+	local passed, worst = 0, nil
+
+	for index, hitTime in ipairs(hits) do
+		local state, gap = checkCoverage(intervals, hitTime, ping)
+		local ok = state == "BLOCKED"
+		if ok then
+			passed += 1
+		elseif not worst then
+			worst = { state = state, gap = gap, index = index }
+		end
+
+		table.insert(timeline.ticks, { at = hitTime, color = ok and COLORS.good or COLORS.bad })
+		if #hits > 1 then
+			table.insert(result.lines, string.format("Hit %d: %s%s", index, state, ok and string.format(" (+%d ms)", gap * 1000) or string.format(" (%d ms)", gap * 1000)))
+		end
+	end
+
+	result.ok = passed == #hits
+
+	if #hits > 1 then
+		result.title = string.format("%d/%d BLOCKED", passed, #hits)
+	elseif result.ok then
+		result.title = "BLOCKED"
+		local _, margin = checkCoverage(intervals, hits[1], ping)
+		table.insert(result.lines, string.format("Block was up %d ms of margin.", margin * 1000))
+	elseif worst and worst.state == "NONE" then
+		result.title = "NO BLOCK"
+		table.insert(result.lines, Settings.autoBlock and explainMiss(run.events) or "Auto Block is turned off.")
+	elseif worst and worst.state == "LATE" then
+		result.title = "TOO LATE"
+		table.insert(result.lines, string.format("Block landed %d ms after the hit: raise Block Lead.", worst.gap * 1000))
+	else
+		result.title = "RELEASED EARLY"
+		table.insert(result.lines, string.format("Block ended %d ms before the hit: raise Chain Tail or Hold Time.", (worst and worst.gap or 0) * 1000))
+	end
+
+	return result
+end
+
+---Run one lab test and return its result.
+---@param testName string
+---@param distance number
+---@return table
+local function runLabOnce(testName, distance)
+	local test = LAB_TESTS[testName]
+	local _, myRoot = getMe()
+	if not myRoot then
+		return { ok = false, title = "NO CHARACTER", lines = { "Spawn in first." } }
+	end
+
+	local dummy = getLabDummy()
+	if not dummy then
+		return { ok = false, title = "CLONE FAILED", lines = { "Could not copy your character." } }
+	end
+
+	local root = dummy:FindFirstChild("HumanoidRootPart")
+	local humanoid = dummy:FindFirstChildOfClass("Humanoid")
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	dummy.Parent = workspace:FindFirstChild("Live") or workspace
+
+	local look = flatten(myRoot.CFrame.LookVector)
+	local right = flatten(myRoot.CFrame.RightVector)
+	local origin = myRoot.Position
+
+	-- Where the target stands, which way it faces, and which way it moves.
+	local position, facing, motion
+	if testName == "Side Dash In" or testName == "Block: Side Dash" then
+		position, facing, motion = origin + right * distance, look, -right
+	elseif testName == "Side Dash Away" then
+		position, facing, motion = origin + right * 4, look, right
+	elseif testName == "Backdash" then
+		position, facing, motion = origin + look * distance, -look, look
+	elseif testName == "Front Dash" then
+		position, facing, motion = origin + look * distance, -look, -look
+	else
+		position, facing, motion = origin + look * Settings.labAttackDist, -look, Vector3.zero
+	end
+
+	local function place()
+		root.CFrame = CFrame.lookAt(position, position + facing)
+		root.AssemblyLinearVelocity = Vector3.zero
+	end
+
+	place()
+	-- Give Zenny a moment to notice the new target.
+	task.wait(0.35)
+	place()
+
+	if test.type == "dash" then
+		local id = getDashAnimationId(test.kind)
+		if not id then
+			return { ok = false, title = "NO ANIMATION", lines = { "No animation id known for this dash. Learn it first." } }
+		end
+
+		labRun = { t0 = os.clock(), events = {}, samples = {} }
+		local track = playLabTrack(animator, id)
+		if not track then
+			labRun = nil
+			return { ok = false, title = "NO ANIMATION", lines = { "The dash animation could not play on the target." } }
+		end
+
+		local startTime = os.clock()
+		while true do
+			local moving = os.clock() - startTime < LAB_DASH_TIME
+			local velocity = root.AssemblyLinearVelocity
+			root.AssemblyLinearVelocity = moving and Vector3.new(motion.X * Settings.labSpeed, velocity.Y, motion.Z * Settings.labSpeed)
+				or Vector3.new(0, velocity.Y, 0)
+
+			table.insert(labRun.samples, {
+				t = os.clock() - labRun.t0,
+				distance = ((root.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude,
+			})
+
+			if os.clock() - startTime > LAB_DASH_TIME + 0.6 then
+				break
+			end
+			runService.Heartbeat:Wait()
+		end
+
+		local run = labRun
+		labRun = nil
+		track:Stop(0.1)
+
+		if test.block then
+			return evaluateSideBlock(run)
+		end
+
+		if test.kind == "FRONT" then
+			return evaluateFront(run)
+		end
+
+		return evaluateDash(run, test, distance)
+	end
+
+	-- Block tests: play one attack, or a string of attacks.
+	local ids = getAttackIds(testName)
+	if #ids == 0 then
+		return { ok = false, title = "NO ANIMATION", lines = { "No animation known for this move. Use its Learn button first." } }
+	end
+
+	local gap = 0.45
+	local starts, hits = {}, {}
+	for index, id in ipairs(ids) do
+		starts[index] = (index - 1) * gap
+		local learnedHit = moveData[id] and moveData[id].hit
+		hits[index] = starts[index] + (learnedHit or Settings.labHit)
+	end
+
+	labRun = { t0 = os.clock(), events = {}, samples = {} }
+	local tracks = {}
+	for index, id in ipairs(ids) do
+		task.delay(starts[index], function()
+			if labRun then
+				local track = playLabTrack(animator, id)
+				if track then
+					table.insert(tracks, track)
+				end
+			end
+		end)
+	end
+
+	task.wait(hits[#hits] + 0.7)
+
+	local run = labRun
+	labRun = nil
+	for _, track in ipairs(tracks) do
+		track:Stop(0.1)
+	end
+
+	if #tracks == 0 then
+		return { ok = false, title = "NO ANIMATION", lines = { "The animation could not play on the target." } }
+	end
+
+	return evaluateBlock(run, hits)
+end
+
+---Show the latest pass rate in the result text.
+---@return string
+local function getLabSummary()
+	if #labHistory == 0 then
+		return "No runs yet"
+	end
+
+	local passed = 0
+	for _, ok in ipairs(labHistory) do
+		if ok then
+			passed += 1
+		end
+	end
+
+	return string.format("Last %d runs: %d passed", #labHistory, passed)
+end
+
+---Run a lab test once, or a batch with a little random distance.
+---@param count number
+local function startLab(count)
+	if labRunning then
+		return
+	end
+
+	labRunning = true
+	task.spawn(function()
+		local testName = Settings.labTest
+		local ok, err = pcall(function()
+			table.clear(labHistory)
+			local passes, last = 0, nil
+
+			for index = 1, count do
+				local distance = Settings.labDistance
+				if count > 1 then
+					distance = math.clamp(distance + math.random(-2, 2), 3, 25)
+				end
+
+				last = runLabOnce(testName, distance)
+				table.insert(labHistory, last.ok == true)
+				if last.ok then
+					passes += 1
+				end
+
+				if labResultCallback then
+					local shown = table.clone(last)
+					if count > 1 then
+						shown.title = string.format("%s  (%d/%d)", last.title, passes, index)
+					end
+					shown.summary = getLabSummary()
+					labResultCallback(shown)
+				end
+
+				if index < count then
+					task.wait(0.8)
+				end
+			end
+
+			log(string.format("lab %s: %d/%d", testName, passes, count))
+		end)
+
+		labRun = nil
+		labRunning = false
+		removeLabDummy()
+
+		if not ok then
+			log("lab error: " .. tostring(err))
+			if labResultCallback then
+				labResultCallback({ ok = false, title = "LAB ERROR", lines = { tostring(err) }, summary = getLabSummary() })
+			end
+		end
+	end)
+end
+
+---Check whether an input is a click or touch.
+---@param input InputObject
+---@return boolean
+local function isPointer(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+end
+
+---Check whether an input is pointer movement.
+---@param input InputObject
+---@return boolean
+local function isPointerMove(input)
+	return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+end
+
+---Add rounded corners to a gui object.
+---@param parent GuiObject
+---@param radius number
+local function corner(parent, radius)
+	return newInstance("UICorner", { CornerRadius = UDim.new(0, radius) }, parent)
+end
+
+---Add a thin green outline to a gui object.
+---@param parent GuiObject
+---@param transparency number
+---@param thickness number?
+local function outline(parent, transparency, thickness)
+	return newInstance("UIStroke", {
+		Color = COLORS.accent,
+		Transparency = transparency,
+		Thickness = thickness or 1,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, parent)
+end
+
+local rowOrder = setmetatable({}, { __mode = "k" })
+local rowRegistry = {}
+local sectionHeaders = setmetatable({}, { __mode = "k" })
+local pageOfScroll = setmetatable({}, { __mode = "k" })
+local infoRows = {}
+
+---Get the next layout order for a parent.
+---@param parent Instance
+---@return number
+local function nextOrder(parent)
+	rowOrder[parent] = (rowOrder[parent] or 0) + 1
+	return rowOrder[parent]
+end
+
+---Register a refresh function for a setting; several rows can share one key.
+---@param key string
+---@param fn function
+local function registerRefresher(key, fn)
+	local previous = uiRefreshers[key]
+	uiRefreshers[key] = function(animated)
+		if previous then
+			pcall(previous, animated)
+		end
+
+		fn(animated)
+	end
+end
+
+---Add a press-scale effect to a gui object.
+---@param target GuiObject
+local function addPress(target)
+	local scale = newInstance("UIScale", { Scale = 1 }, target)
+
+	connect(target.InputBegan, function(input)
+		if isPointer(input) then
+			tween(scale, { Scale = 0.95 }, QUICK)
+		end
+	end)
+	connect(target.InputEnded, function(input)
+		if isPointer(input) then
+			tween(scale, { Scale = 1 }, QUICK)
+		end
+	end)
+end
+
+---Add a titled card to a page and return the card.
+---@param page ScrollingFrame
+---@param title string
+---@return Frame
+local function addSection(page, title)
+	local header = newInstance("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 18),
+		BackgroundTransparency = 1,
+		Text = string.upper(title),
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 11,
+		LayoutOrder = nextOrder(page),
+	}, page)
+
+	local card = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(page),
+	}, page)
+	corner(card, 14)
+	outline(card, 0.82)
+	newInstance("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, card)
+
+	sectionHeaders[card] = header
+	return card
+end
+
+---Create a row with a title and optional subtitle.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param className string
+---@return GuiObject, TextLabel
+local function createRow(card, title, subtitle, className)
+	local row = newInstance(className, {
+		Size = UDim2.new(1, 0, 0, subtitle and 48 or 40),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(card),
+	}, card)
+	if className == "TextButton" then
+		row.Text = ""
+		row.AutoButtonColor = false
+	end
+
+	local titleLabel = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, subtitle and 6 or 0),
+		Size = UDim2.new(0.55, -14, 0, subtitle and 20 or 40),
+		BackgroundTransparency = 1,
+		Text = title,
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 14,
+	}, row)
+
+	if subtitle then
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(14, 26),
+			Size = UDim2.new(0.55, -14, 0, 16),
+			BackgroundTransparency = 1,
+			Text = subtitle,
+			TextColor3 = COLORS.dim,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.Gotham,
+			TextSize = 11,
+		}, row)
+	end
+
+	newInstance("Frame", {
+		Position = UDim2.new(0, 14, 1, -1),
+		Size = UDim2.new(1, -28, 0, 1),
+		BackgroundColor3 = COLORS.accent,
+		BackgroundTransparency = 0.92,
+		BorderSizePixel = 0,
+	}, row)
+
+	table.insert(rowRegistry, { row = row, title = title:lower(), card = card })
+	return row, titleLabel
+end
+
+---Add a switch row bound to a boolean setting.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param key string
+local function addSwitch(card, title, subtitle, key)
+	local row = createRow(card, title, subtitle, "TextButton")
+
+	local track = newInstance("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(40, 22),
+		BorderSizePixel = 0,
+	}, row)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+
+	local knob = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Size = UDim2.fromOffset(16, 16),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, track)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+
+	local function refresh(animated)
+		local on = Settings[key]
+		local trackGoal = { BackgroundColor3 = on and COLORS.accent or COLORS.off }
+		local knobGoal = {
+			Position = on and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
+			BackgroundColor3 = on and COLORS.ink or COLORS.dim,
+		}
+
+		if animated then
+			tween(track, trackGoal)
+			tween(knob, knobGoal)
+			return
+		end
+
+		track.BackgroundColor3 = trackGoal.BackgroundColor3
+		knob.Position = knobGoal.Position
+		knob.BackgroundColor3 = knobGoal.BackgroundColor3
+	end
+
+	refresh(false)
+	registerRefresher(key, refresh)
+	connect(row.MouseButton1Click, function()
+		Settings[key] = not Settings[key]
+		refresh(true)
+		onSettingChanged(key)
+	end)
+end
+
+---Add a slider row bound to a number setting.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param key string
+---@param min number
+---@param max number
+---@param step number
+---@param suffix string
+local function addSlider(card, title, subtitle, key, min, max, step, suffix)
+	local row = createRow(card, title, subtitle, "Frame")
+	local scroll = card.Parent
+
+	local hit = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0.55, 0, 0.5, 0),
+		Size = UDim2.new(0.45, -86, 0, 30),
+		BackgroundTransparency = 1,
+		Active = true,
+	}, row)
+
+	local bar = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.new(1, 0, 0, 6),
+		BackgroundColor3 = COLORS.off,
+		BorderSizePixel = 0,
+	}, hit)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
+
+	local fill = newInstance("Frame", {
+		Size = UDim2.fromScale(0, 1),
+		BackgroundColor3 = COLORS.accent,
+		BorderSizePixel = 0,
+	}, bar)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, fill)
+
+	local knob = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.fromOffset(14, 14),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, bar)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+
+	local value = newInstance("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(64, 20),
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+	}, row)
+
+	local function render(animated)
+		local alpha = math.clamp((Settings[key] - min) / (max - min), 0, 1)
+		if animated then
+			tween(fill, { Size = UDim2.fromScale(alpha, 1) }, QUICK)
+			tween(knob, { Position = UDim2.new(alpha, 0, 0.5, 0) }, QUICK)
+		else
+			fill.Size = UDim2.fromScale(alpha, 1)
+			knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+		end
+
+		value.Text = string.format("%g%s", Settings[key], suffix)
+	end
+
+	local function setFromX(x)
+		local alpha = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+		Settings[key] = math.floor((min + (max - min) * alpha) / step + 0.5) * step
+		render(true)
+	end
+
+	local dragging = false
+	render(false)
+	registerRefresher(key, render)
+
+	connect(hit.InputBegan, function(input)
+		if isPointer(input) then
+			dragging = true
+			scroll.ScrollingEnabled = false
+			setFromX(input.Position.X)
+		end
+	end)
+	connect(userInputService.InputChanged, function(input)
+		if dragging and isPointerMove(input) then
+			setFromX(input.Position.X)
+		end
+	end)
+	connect(userInputService.InputEnded, function(input)
+		if dragging and isPointer(input) then
+			dragging = false
+			scroll.ScrollingEnabled = true
+		end
+	end)
+end
+
+---Add a row that cycles through string options.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param key string
+---@param options table
+local function addCycle(card, title, subtitle, key, options)
+	local row = createRow(card, title, subtitle, "TextButton")
+
+	local value = newInstance("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(110, 20),
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.accent,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		Text = Settings[key],
+	}, row)
+
+	registerRefresher(key, function()
+		value.Text = Settings[key]
+	end)
+
+	connect(row.MouseButton1Click, function()
+		local index = table.find(options, Settings[key]) or 0
+		Settings[key] = options[index % #options + 1]
+		value.Text = Settings[key]
+	end)
+end
+
+---Add a row with an action button.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param buttonText string
+---@param callback function
+local function addAction(card, title, subtitle, buttonText, callback)
+	local row = createRow(card, title, subtitle, "Frame")
+
+	local button = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(92, 26),
+		BackgroundColor3 = COLORS.accent,
+		Text = buttonText,
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, row)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, button)
+	addPress(button)
+	connect(button.MouseButton1Click, callback)
+end
+
+---Add a row showing text that refreshes twice a second.
+---@param card Frame
+---@param title string
+---@param getText function
+local function addInfo(card, title, getText)
+	local row = createRow(card, title, nil, "Frame")
+
+	local value = newInstance("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.new(0.45, 0, 0, 20),
+		BackgroundTransparency = 1,
+		Text = getText(),
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+	}, row)
+
+	table.insert(infoRows, { label = value, get = getText })
+end
+
+---Count the learned ids of a move.
+---@param name string
+---@return number
+local function countLearned(name)
+	local count = 0
+	for _ in pairs(learned[name]) do
+		count += 1
+	end
+
+	return count
+end
+
+---Format seconds as a short runtime.
+---@param seconds number
+---@return string
+local function formatRuntime(seconds)
+	seconds = math.floor(seconds)
+	if seconds >= 3600 then
+		return string.format("%dh %02dm", seconds // 3600, (seconds % 3600) // 60)
+	end
+
+	return string.format("%dm %02ds", seconds // 60, seconds % 60)
+end
+
+local INDICATOR_LIST = {
+	{ "autoBlock", "Auto Block" },
+	{ "adaptiveBlock", "Adaptive Timing" },
+	{ "autoEvasive", "Auto Evasive" },
+	{ "consecBlock", "Consec Block" },
+	{ "shoveM1", "Shove M1" },
+	{ "catchEnabled", "Side Dash M1" },
+	{ "bdcEnabled", "Backdash M1" },
+	{ "frontBlock", "Front Dash Block" },
+	{ "catchFace", "Lock" },
+	{ "techLoop", "Tech" },
+	{ "counterBait", "Counter Bait" },
+}
+
+---Build the window, pages, quick pills and indicators.
+local function buildGui()
+	gui = newInstance("ScreenGui", { Name = "Zenny", ResetOnSpawn = false, DisplayOrder = 50 }, nil)
+
+	local parented = pcall(function()
+		gui.Parent = (gethui and gethui()) or coreGuiService
+	end)
+	if not parented or not gui.Parent then
+		gui.Parent = playerGui
+	end
+
+	holder = newInstance("Folder", { Name = "ZennyObjects" }, gui)
+
+	local loadedAt = os.clock()
+	local camera = workspace.CurrentCamera
+	local viewport = camera and camera.ViewportSize or Vector2.new(800, 400)
+	local width = math.min(viewport.X - 24, 720)
+	local height = math.min(viewport.Y - 24, 380)
+	local mainWidth = width - 166
+
+	local window = newInstance("CanvasGroup", {
+		Name = "Window",
+		Size = UDim2.fromOffset(width, height),
+		Position = UDim2.fromOffset(math.floor((viewport.X - width) / 2), math.floor((viewport.Y - height) / 2)),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BackgroundTransparency = 0.04,
+		BorderSizePixel = 0,
+		GroupTransparency = 1,
+		Visible = false,
+	}, gui)
+	corner(window, 24)
+	newInstance("UIGradient", {
+		Rotation = 135,
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(6, 18, 10)),
+			ColorSequenceKeypoint.new(0.55, Color3.fromRGB(3, 8, 5)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(8, 26, 14)),
+		}),
+	}, window)
+
+	-- Glowing edge that fades from the bottom left like the mockup.
+	local edge = newInstance("UIStroke", { Color = COLORS.accent, Thickness = 2, Transparency = 0 }, window)
+	newInstance("UIGradient", {
+		Rotation = 45,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.05),
+			NumberSequenceKeypoint.new(0.5, 0.85),
+			NumberSequenceKeypoint.new(1, 0.4),
+		}),
+	}, edge)
+	local windowScale = newInstance("UIScale", { Scale = 0.94 }, window)
+
+	-- Sidebar with logo, navigation and the build card.
+	local sidebar = newInstance("Frame", {
+		Position = UDim2.fromOffset(10, 10),
+		Size = UDim2.new(0, 132, 1, -20),
+		BackgroundColor3 = Color3.fromRGB(5, 12, 8),
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, window)
+	corner(sidebar, 18)
+	outline(sidebar, 0.8)
+
+	local logoRow = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 50),
+		BackgroundTransparency = 1,
+		Active = true,
+	}, sidebar)
+
+	local badge = newInstance("Frame", {
+		Position = UDim2.fromOffset(14, 12),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundColor3 = COLORS.accent,
+		BorderSizePixel = 0,
+	}, logoRow)
+	corner(badge, 8)
+	newInstance("UIGradient", {
+		Rotation = 90,
+		Color = ColorSequence.new(Color3.fromRGB(180, 255, 200), COLORS.accentDark),
+	}, badge)
+	newInstance("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Text = "Z",
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 18,
+	}, badge)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(50, 0),
+		Size = UDim2.new(1, -56, 1, 0),
+		BackgroundTransparency = 1,
+		Text = "Zenny",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 19,
+	}, logoRow)
+
+	local showCard = height >= 340
+	local nav = newInstance("ScrollingFrame", {
+		Position = UDim2.fromOffset(0, 54),
+		Size = UDim2.new(1, 0, 1, showCard and -146 or -62),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 0,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(),
+	}, sidebar)
+	newInstance("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, nav)
+	newInstance("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, nav)
+
+	if showCard then
+		local buildCard = newInstance("Frame", {
+			AnchorPoint = Vector2.new(0, 1),
+			Position = UDim2.new(0, 8, 1, -8),
+			Size = UDim2.new(1, -16, 0, 80),
+			BackgroundColor3 = COLORS.card,
+			BackgroundTransparency = 0.2,
+			BorderSizePixel = 0,
+		}, sidebar)
+		corner(buildCard, 14)
+		outline(buildCard, 0.7)
+
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(10, 8),
+			Size = UDim2.new(1, -20, 0, 18),
+			BackgroundTransparency = 1,
+			Text = "👑 Zenny v1.5",
+			TextColor3 = COLORS.warn,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.GothamBold,
+			TextSize = 13,
+		}, buildCard)
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(10, 26),
+			Size = UDim2.new(1, -20, 0, 14),
+			BackgroundTransparency = 1,
+			Text = "Private build",
+			TextColor3 = COLORS.dim,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.Gotham,
+			TextSize = 10,
+		}, buildCard)
+
+		local unload = newInstance("TextButton", {
+			Position = UDim2.new(0, 10, 1, -32),
+			Size = UDim2.new(1, -20, 0, 24),
+			BackgroundTransparency = 1,
+			Text = "Unload",
+			TextColor3 = COLORS.accent,
+			Font = Enum.Font.GothamBold,
+			TextSize = 12,
+			AutoButtonColor = false,
+		}, buildCard)
+		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, unload)
+		outline(unload, 0.2, 1.5)
+		addPress(unload)
+		connect(unload.MouseButton1Click, function()
+			Zenny.detach()
+		end)
+	end
+
+	-- Main area: top bar and pages.
+	local main = newInstance("Frame", {
+		Position = UDim2.fromOffset(152, 10),
+		Size = UDim2.new(1, -162, 1, -20),
+		BackgroundTransparency = 1,
+	}, window)
+
+	local topBar = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 40),
+		BackgroundTransparency = 1,
+		Active = true,
+	}, main)
+
+	local search = newInstance("Frame", {
+		Size = UDim2.new(0.42, 0, 0, 34),
+		Position = UDim2.fromOffset(0, 3),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, topBar)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, search)
+	outline(search, 0.75)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.fromOffset(20, 34),
+		BackgroundTransparency = 1,
+		Text = "🔍",
+		TextColor3 = COLORS.dim,
+		TextSize = 14,
+		Font = Enum.Font.Gotham,
+	}, search)
+	local searchBox = newInstance("TextBox", {
+		Position = UDim2.fromOffset(36, 0),
+		Size = UDim2.new(1, -44, 1, 0),
+		BackgroundTransparency = 1,
+		PlaceholderText = "Search features...",
+		PlaceholderColor3 = COLORS.dim,
+		Text = "",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ClearTextOnFocus = false,
+		Font = Enum.Font.Gotham,
+		TextSize = 13,
+	}, search)
+
+	-- Window controls on the far right.
+	local closeButton = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, 0, 0.5, 0),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundTransparency = 1,
+		Text = "✕",
+		TextColor3 = COLORS.dim,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		AutoButtonColor = false,
+	}, topBar)
+	local minimizeButton = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -30, 0.5, 0),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundTransparency = 1,
+		Text = "—",
+		TextColor3 = COLORS.dim,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		AutoButtonColor = false,
+	}, topBar)
+
+	-- User chip.
+	local chip = newInstance("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -62, 0.5, 0),
+		Size = UDim2.fromOffset(132, 36),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, topBar)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, chip)
+	outline(chip, 0.75)
+
+	local avatar = newInstance("ImageLabel", {
+		Position = UDim2.fromOffset(4, 4),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundColor3 = COLORS.off,
+		Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", localPlayer.UserId),
+		BorderSizePixel = 0,
+	}, chip)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, avatar)
+	outline(avatar, 0.2, 1.5)
+
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(38, 3),
+		Size = UDim2.new(1, -44, 0, 16),
+		BackgroundTransparency = 1,
+		Text = localPlayer.DisplayName,
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+	}, chip)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(38, 18),
+		Size = UDim2.new(1, -44, 0, 14),
+		BackgroundTransparency = 1,
+		Text = "● Online",
+		TextColor3 = COLORS.accent,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Gotham,
+		TextSize = 10,
+	}, chip)
+
+	local bell = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -200, 0.5, 0),
+		Size = UDim2.fromOffset(32, 32),
+		BackgroundTransparency = 1,
+		Text = "🔔",
+		TextColor3 = COLORS.dim,
+		Font = Enum.Font.Gotham,
+		TextSize = 16,
+		AutoButtonColor = false,
+	}, topBar)
+
+	local content = newInstance("Frame", {
+		Position = UDim2.fromOffset(0, 46),
+		Size = UDim2.new(1, 0, 1, -46),
+		BackgroundTransparency = 1,
+	}, main)
+
+	-- Tabs and pages.
+	local tabs = {}
+	local tabOrder = {}
+	local activeTab = nil
+
+	local function selectTab(name)
+		activeTab = name
+		for tabName, entry in pairs(tabs) do
+			local active = tabName == name
+			if active then
+				entry.page.Visible = true
+			else
+				task.delay(0.22, function()
+					if activeTab ~= tabName then
+						entry.page.Visible = false
+					end
+				end)
+			end
+
+			tween(entry.page, { GroupTransparency = active and 0 or 1 })
+			tween(entry.tab, {
+				BackgroundTransparency = active and 0.86 or 1,
+				TextColor3 = active and COLORS.text or COLORS.dim,
+			})
+			tween(entry.indicator, { BackgroundTransparency = active and 0 or 1 })
+		end
+	end
+
+	local function addPage(name, order, icon)
+		local tab = newInstance("TextButton", {
+			Size = UDim2.new(1, 0, 0, 32),
+			BackgroundColor3 = COLORS.accent,
+			BackgroundTransparency = 1,
+			Text = name,
+			TextColor3 = COLORS.dim,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 13,
+			AutoButtonColor = false,
+			LayoutOrder = order,
+		}, nav)
+		corner(tab, 10)
+		newInstance("UIPadding", { PaddingLeft = UDim.new(0, 36) }, tab)
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(-28, 0),
+			Size = UDim2.fromOffset(22, 32),
+			BackgroundTransparency = 1,
+			Text = icon,
+			TextColor3 = COLORS.text,
+			Font = Enum.Font.Gotham,
+			TextSize = 14,
+		}, tab)
+
+		local indicator = newInstance("Frame", {
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, -34, 0.5, 0),
+			Size = UDim2.fromOffset(3, 18),
+			BackgroundColor3 = COLORS.accent,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+		}, tab)
+		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, indicator)
+
+		local page = newInstance("CanvasGroup", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			GroupTransparency = 1,
+			Visible = false,
+		}, content)
+		local scroll = newInstance("ScrollingFrame", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			ScrollBarThickness = 0,
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			CanvasSize = UDim2.new(),
+			ScrollingDirection = Enum.ScrollingDirection.Y,
+		}, page)
+		newInstance("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, scroll)
+		newInstance("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 12), PaddingRight = UDim.new(0, 2) }, scroll)
+
+		tabs[name] = { tab = tab, page = page, indicator = indicator }
+		pageOfScroll[scroll] = name
+		table.insert(tabOrder, name)
+		connect(tab.MouseButton1Click, function()
+			selectTab(name)
+		end)
+
+		return scroll
+	end
+
+	-- Home.
+	local home = addPage("Home", 0, "🏠")
+
+	local hero = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 162),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+		LayoutOrder = 1,
+	}, home)
+	corner(hero, 20)
+	outline(hero, 0.7)
+	newInstance("UIGradient", {
+		Rotation = 20,
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(6, 14, 9)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(14, 52, 26)),
+		}),
+	}, hero)
+
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(20, 12),
+		Size = UDim2.fromOffset(200, 20),
+		BackgroundTransparency = 1,
+		Text = "Welcome to",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Gotham,
+		TextSize = 15,
+	}, hero)
+	local heroTitle = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(20, 30),
+		Size = UDim2.fromOffset(240, 46),
+		BackgroundTransparency = 1,
+		Text = "Zenny",
+		TextColor3 = Color3.new(1, 1, 1),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 42,
+	}, hero)
+	newInstance("UIGradient", {
+		Rotation = 90,
+		Color = ColorSequence.new(Color3.fromRGB(215, 255, 225), COLORS.accent),
+	}, heroTitle)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(20, 80),
+		Size = UDim2.fromOffset(260, 20),
+		BackgroundTransparency = 1,
+		Text = "Smarter. Faster. Stronger.",
+		TextColor3 = COLORS.accent,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+	}, hero)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(20, 102),
+		Size = UDim2.fromOffset(250, 16),
+		BackgroundTransparency = 1,
+		Text = "Your TSB combat assistant.",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+	}, hero)
+
+	local getStarted = newInstance("TextButton", {
+		Position = UDim2.fromOffset(20, 124),
+		Size = UDim2.fromOffset(118, 30),
+		BackgroundColor3 = COLORS.accent,
+		Text = "Get Started  ➜",
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, hero)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, getStarted)
+	addPress(getStarted)
+
+	local explore = newInstance("TextButton", {
+		Position = UDim2.fromOffset(146, 124),
+		Size = UDim2.fromOffset(116, 30),
+		BackgroundTransparency = 1,
+		Text = "Explore Tools",
+		TextColor3 = COLORS.text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, hero)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, explore)
+	outline(explore, 0.4, 1.5)
+	addPress(explore)
+
+	-- Orbit ring around a big Z, like the logo in the mockup.
+	local emblem = newInstance("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -26, 0.5, 0),
+		Size = UDim2.fromOffset(132, 132),
+		BackgroundTransparency = 1,
+	}, hero)
+	local glow = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(96, 96),
+		BackgroundColor3 = COLORS.accent,
+		BackgroundTransparency = 0.88,
+		BorderSizePixel = 0,
+	}, emblem)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, glow)
+	local ring = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(128, 128),
+		BackgroundTransparency = 1,
+	}, emblem)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, ring)
+	local ringStroke = outline(ring, 0, 3)
+	newInstance("UIGradient", {
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(0.55, 0.9),
+			NumberSequenceKeypoint.new(1, 0),
+		}),
+	}, ringStroke)
+	local bigZ = newInstance("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Text = "Z",
+		TextColor3 = Color3.new(1, 1, 1),
+		Font = Enum.Font.GothamBlack,
+		TextSize = 78,
+	}, emblem)
+	newInstance("UIGradient", {
+		Rotation = 90,
+		Color = ColorSequence.new(Color3.fromRGB(235, 255, 240), COLORS.accentDark),
+	}, bigZ)
+
+	connect(runService.RenderStepped, function(delta)
+		ring.Rotation = (ring.Rotation + delta * 40) % 360
+	end)
+
+	connect(getStarted.MouseButton1Click, function()
+		selectTab("Combat")
+	end)
+	connect(explore.MouseButton1Click, function()
+		selectTab("Dashes")
+	end)
+
+	-- Stat cards.
+	local statsRow = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 66),
+		BackgroundTransparency = 1,
+		LayoutOrder = 2,
+	}, home)
+	newInstance("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 8),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, statsRow)
+
+	---Build one stat card with a value and a small bar chart.
+	---@param order number
+	---@param icon string
+	---@param title string
+	---@param barCount number
+	---@return TextLabel, table
+	local function addStat(order, icon, title, barCount)
+		local card = newInstance("Frame", {
+			Size = UDim2.new(1 / 3, -6, 1, 0),
+			BackgroundColor3 = COLORS.card,
+			BackgroundTransparency = 0.2,
+			BorderSizePixel = 0,
+			LayoutOrder = order,
+		}, statsRow)
+		corner(card, 14)
+		outline(card, 0.8)
+
+		local box = newInstance("TextLabel", {
+			Position = UDim2.fromOffset(10, 15),
+			Size = UDim2.fromOffset(36, 36),
+			BackgroundColor3 = COLORS.off,
+			Text = icon,
+			TextColor3 = COLORS.accent,
+			Font = Enum.Font.GothamBold,
+			TextSize = 16,
+		}, card)
+		corner(box, 10)
+
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(54, 12),
+			Size = UDim2.new(0.5, -40, 0, 14),
+			BackgroundTransparency = 1,
+			Text = title,
+			TextColor3 = COLORS.dim,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.Gotham,
+			TextSize = 10,
+		}, card)
+		local value = newInstance("TextLabel", {
+			Position = UDim2.fromOffset(54, 28),
+			Size = UDim2.new(0.5, -40, 0, 26),
+			BackgroundTransparency = 1,
+			Text = "-",
+			TextColor3 = COLORS.text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.GothamBold,
+			TextSize = 17,
+		}, card)
+
+		local bars = newInstance("Frame", {
+			AnchorPoint = Vector2.new(1, 1),
+			Position = UDim2.new(1, -10, 1, -10),
+			Size = UDim2.new(0.34, 0, 0, 34),
+			BackgroundTransparency = 1,
+		}, card)
+		newInstance("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			VerticalAlignment = Enum.VerticalAlignment.Bottom,
+			Padding = UDim.new(0, 2),
+		}, bars)
+
+		local list = {}
+		for index = 1, barCount do
+			local bar = newInstance("Frame", {
+				Size = UDim2.new(1 / barCount, -2, 0.2, 0),
+				BackgroundColor3 = COLORS.accent,
+				BackgroundTransparency = 0.2,
+				BorderSizePixel = 0,
+				LayoutOrder = index,
+			}, bars)
+			newInstance("UICorner", { CornerRadius = UDim.new(0, 2) }, bar)
+			list[index] = bar
+		end
+
+		return value, list
+	end
+
+	local fpsValue, fpsBars = addStat(1, "⚡", "FPS", 8)
+	local moduleValue, moduleBars = addStat(2, "▣", "Active Modules", 8)
+	local runtimeValue, runtimeBars = addStat(3, "🕒", "Runtime", 8)
+
+	-- Quick actions and system status.
+	local lowerRow = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 126),
+		BackgroundTransparency = 1,
+		LayoutOrder = 3,
+	}, home)
+	newInstance("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 8),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, lowerRow)
+
+	local quickCard = newInstance("Frame", {
+		Size = UDim2.new(0.66, -4, 1, 0),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+		LayoutOrder = 1,
+	}, lowerRow)
+	corner(quickCard, 14)
+	outline(quickCard, 0.8)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 8),
+		Size = UDim2.fromOffset(140, 22),
+		BackgroundTransparency = 1,
+		Text = "Quick Actions",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+	}, quickCard)
+	local viewAll = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -12, 0, 8),
+		Size = UDim2.fromOffset(70, 22),
+		BackgroundTransparency = 1,
+		Text = "View All ➜",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		AutoButtonColor = false,
+	}, quickCard)
+	connect(viewAll.MouseButton1Click, function()
+		selectTab("Combat")
+	end)
+
+	local tileGrid = newInstance("Frame", {
+		Position = UDim2.fromOffset(10, 34),
+		Size = UDim2.new(1, -20, 1, -42),
+		BackgroundTransparency = 1,
+	}, quickCard)
+	local tileWidth = math.max(math.floor((mainWidth * 0.66 - 4 - 20 - 18) / 4), 44)
+	newInstance("UIGridLayout", {
+		CellSize = UDim2.fromOffset(tileWidth, 78),
+		CellPadding = UDim2.fromOffset(6, 6),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, tileGrid)
+
+	local tiles = {}
+	for index, info in ipairs({
+		{ "Auto Block", "autoBlock", "🛡" },
+		{ "Side Dash M1", "catchEnabled", "💨" },
+		{ "Backdash M1", "bdcEnabled", "⏪" },
+		{ "Front Dash Block", "frontBlock", "⚡" },
+	}) do
+		local tile = newInstance("TextButton", {
+			BackgroundColor3 = COLORS.off,
+			BackgroundTransparency = 0.45,
+			Text = "",
+			AutoButtonColor = false,
+			LayoutOrder = index,
+		}, tileGrid)
+		corner(tile, 12)
+		local tileStroke = outline(tile, 0.85)
+		addPress(tile)
+
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(8, 6),
+			Size = UDim2.fromOffset(28, 26),
+			BackgroundTransparency = 1,
+			Text = info[3],
+			TextColor3 = COLORS.accent,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.Gotham,
+			TextSize = 20,
+		}, tile)
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(8, 36),
+			Size = UDim2.new(1, -12, 0, 34),
+			BackgroundTransparency = 1,
+			Text = info[1],
+			TextColor3 = COLORS.text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			TextWrapped = true,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 11,
+		}, tile)
+
+		tiles[index] = { tile = tile, stroke = tileStroke, key = info[2] }
+		connect(tile.MouseButton1Click, function()
+			Settings[info[2]] = not Settings[info[2]]
+			local refresh = uiRefreshers[info[2]]
+			if refresh then
+				refresh(true)
+			end
+			onSettingChanged(info[2])
+		end)
+	end
+
+	local statusCard = newInstance("Frame", {
+		Size = UDim2.new(0.34, -4, 1, 0),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+		LayoutOrder = 2,
+	}, lowerRow)
+	corner(statusCard, 14)
+	outline(statusCard, 0.8)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 8),
+		Size = UDim2.new(1, -28, 0, 22),
+		BackgroundTransparency = 1,
+		Text = "System Status",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+	}, statusCard)
+	local statusDot = newInstance("Frame", {
+		Position = UDim2.fromOffset(14, 42),
+		Size = UDim2.fromOffset(8, 8),
+		BackgroundColor3 = COLORS.accent,
+		BorderSizePixel = 0,
+	}, statusCard)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, statusDot)
+	local statusText = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(28, 36),
+		Size = UDim2.new(1, -36, 0, 20),
+		BackgroundTransparency = 1,
+		Text = "All Systems Operational",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+	}, statusCard)
+	local statusDetail = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 62),
+		Size = UDim2.new(1, -28, 0, 50),
+		BackgroundTransparency = 1,
+		Text = "",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		TextWrapped = true,
+		Font = Enum.Font.Gotham,
+		TextSize = 10,
+	}, statusCard)
+
+	-- Combat.
+	local combat = addPage("Combat", 1, "⚔️")
+
+	local block = addSection(combat, "Auto Block")
+	addSwitch(block, "Auto Block", "Hold F when an attack starts", "autoBlock")
+	addSwitch(block, "Adaptive Timing", "Learns when each move lands", "adaptiveBlock")
+	addSwitch(block, "Hold Through Move", "Keep blocking until it ends", "blockFull")
+	addSwitch(block, "Broad Detection", "Count any one-shot move", "broadDetect")
+	addSwitch(block, "Enemy Facing Check", "Only enemies facing you", "faceCheck")
+	addSwitch(block, "Face Attacker", "Turn toward them while blocking", "blockFace")
+	addSlider(block, "Block FOV", "Your view cone, 360 = all around", "blockFov", 60, 360, 10, "°")
+	addSlider(block, "Range", "How close they must be", "blockRange", 8, 40, 1, " studs")
+	addSlider(block, "Hold Time", "Minimum time F is held", "blockHold", 0.1, 1, 0.05, "s")
+	addSlider(block, "Block Lead", "React this early", "blockLead", 0, 0.3, 0.01, "s")
+	addSlider(block, "Chain Tail", "Extra hold after a move", "blockTail", 0, 0.6, 0.05, "s")
+	addSlider(block, "Attack Grace", "Ignore reactions to your hits", "selfGrace", 0, 1, 0.05, "s")
+	addSwitch(block, "Pre-Block", "Hold F when enemies are close", "preBlock")
+	addSlider(block, "Pre-Block Range", "You can't attack while it holds", "preBlockRange", 4, 20, 1, " studs")
+
+	local evade = addSection(combat, "Auto Evasive")
+	addSwitch(evade, "Enabled", "Spams dash to cancel ragdoll", "autoEvasive")
+	addCycle(evade, "Mode", "When it triggers", "evasiveMode", { "Ragdoll", "Consec", "Both" })
+	addCycle(evade, "Direction", "Dash direction", "evasiveDirection", { "Back", "Left", "Right" })
+	addSwitch(evade, "Hold Block", "Hold F while spamming", "evasiveBlock")
+	addSlider(evade, "Spam Rate", "Seconds between dashes", "evasiveRate", 0.02, 0.2, 0.01, "s")
+
+	local consec = addSection(combat, "Consec Auto Block")
+	addSwitch(consec, "Enabled", "Hold F during consecutive punches", "consecBlock")
+	addSlider(consec, "Block Chance", "Chance to react", "consecChance", 0, 100, 5, "%")
+	addSlider(consec, "Range", "How close they must be", "consecRange", 5, 40, 1, " studs")
+	addAction(consec, "Learn Move", "Then use your own consec", "Learn", function()
+		learning = "barrage"
+		log("learning consec: use your consecutive punches now")
+	end)
+	addInfo(consec, "Learned", function()
+		return learning == "barrage" and "waiting..." or (countLearned("barrage") .. " ids")
+	end)
+
+	local shove = addSection(combat, "Shove Auto M1")
+	addSwitch(shove, "Enabled", "M1 when a shove is seen", "shoveM1")
+	addSwitch(shove, "Also Block", "Block shoves too", "blockShove")
+	addSlider(shove, "M1 Delay", "Wait before M1", "shoveDelay", 0, 0.5, 0.01, "s")
+	addSlider(shove, "Range", "How close they must be", "shoveRange", 5, 40, 1, " studs")
+	addAction(shove, "Learn Move", "Then use your own shove", "Learn", function()
+		learning = "shove"
+		log("learning shove: use your shove now")
+	end)
+	addInfo(shove, "Learned", function()
+		return learning == "shove" and "waiting..." or (countLearned("shove") .. " ids")
+	end)
+
+	-- Combat Lab.
+	local lab = addPage("Lab", 2, "🧪")
+
+	local labTop = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 244),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(lab),
+	}, lab)
+
+	-- Rotating copy of your character.
+	local previewCard = newInstance("Frame", {
+		Size = UDim2.new(0, 150, 1, 0),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, labTop)
+	corner(previewCard, 14)
+	outline(previewCard, 0.8)
+
+	local previewHolder = newInstance("Frame", {
+		Position = UDim2.fromOffset(6, 6),
+		Size = UDim2.new(1, -12, 1, -34),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+	}, previewCard)
+	newInstance("TextLabel", {
+		Position = UDim2.new(0, 0, 1, -26),
+		Size = UDim2.new(1, 0, 0, 20),
+		BackgroundTransparency = 1,
+		Text = "Drag to spin",
+		TextColor3 = COLORS.dim,
+		Font = Enum.Font.Gotham,
+		TextSize = 10,
+	}, previewCard)
+
+	local previewViewport = newInstance("ViewportFrame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Ambient = Color3.fromRGB(170, 190, 175),
+		LightColor = Color3.new(1, 1, 1),
+		LightDirection = Vector3.new(-0.5, -1, -0.6),
+		Active = true,
+	}, previewHolder)
+	local previewCamera = newInstance("Camera", { FieldOfView = 40 }, previewViewport)
+	previewViewport.CurrentCamera = previewCamera
+
+	local previewModel, previewPivot = nil, nil
+	local previewAngle, spinPausedUntil = 0, 0
+
+	local function rebuildPreview()
+		if previewModel then
+			previewModel:Destroy()
+			previewModel = nil
+		end
+
+		local character = localPlayer.Character
+		if not character then
+			return
+		end
+
+		local archivable = character.Archivable
+		character.Archivable = true
+		local clone = character:Clone()
+		character.Archivable = archivable
+		if not clone then
+			return
+		end
+
+		for _, descendant in ipairs(clone:GetDescendants()) do
+			if descendant:IsA("Script") or descendant:IsA("LocalScript") then
+				descendant:Destroy()
+			end
+		end
+
+		clone:PivotTo(CFrame.new(0, 0, 0))
+		clone.Parent = previewViewport
+		previewModel = clone
+		previewPivot = clone:GetPivot()
+
+		local center, size = clone:GetBoundingBox()
+		local distance = (size.Y / 2) / math.tan(math.rad(20)) * 1.3 + size.Z / 2
+		previewCamera.CFrame = CFrame.lookAt(center.Position + Vector3.new(0, size.Y * 0.05, -distance), center.Position)
+	end
+
+	task.defer(function()
+		pcall(rebuildPreview)
+	end)
+	connect(localPlayer.CharacterAdded, function()
+		task.delay(1.5, function()
+			pcall(rebuildPreview)
+		end)
+	end)
+
+	connect(runService.RenderStepped, function(delta)
+		if previewModel and previewPivot and os.clock() > spinPausedUntil then
+			previewAngle += delta * 0.8
+			previewModel:PivotTo(previewPivot * CFrame.Angles(0, previewAngle, 0))
+		end
+	end)
+
+	local previewDragging = false
+	connect(previewViewport.InputBegan, function(input)
+		if isPointer(input) then
+			previewDragging = true
+			spinPausedUntil = os.clock() + 2
+		end
+	end)
+	connect(userInputService.InputChanged, function(input)
+		if previewDragging and previewModel and previewPivot and isPointerMove(input) then
+			previewAngle += input.Delta.X * 0.015
+			spinPausedUntil = os.clock() + 2
+			previewModel:PivotTo(previewPivot * CFrame.Angles(0, previewAngle, 0))
+		end
+	end)
+	connect(userInputService.InputEnded, function(input)
+		if previewDragging and isPointer(input) then
+			previewDragging = false
+		end
+	end)
+
+	-- Result card.
+	local resultCard = newInstance("Frame", {
+		Position = UDim2.fromOffset(158, 0),
+		Size = UDim2.new(1, -158, 1, 0),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, labTop)
+	corner(resultCard, 14)
+	outline(resultCard, 0.8)
+
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 8),
+		Size = UDim2.new(1, -28, 0, 14),
+		BackgroundTransparency = 1,
+		Text = "RESULT",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+	}, resultCard)
+	local resultTitle = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 22),
+		Size = UDim2.new(1, -28, 0, 30),
+		BackgroundTransparency = 1,
+		Text = "Ready",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 22,
+	}, resultCard)
+	local resultDetail = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 54),
+		Size = UDim2.new(1, -28, 0, 70),
+		BackgroundTransparency = 1,
+		Text = "Pick a test below, then tap Run Test.",
+		TextColor3 = COLORS.dim,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+	}, resultCard)
+
+	local timelineFrame = newInstance("Frame", {
+		Position = UDim2.fromOffset(14, 132),
+		Size = UDim2.new(1, -28, 0, 28),
+		BackgroundColor3 = COLORS.off,
+		BackgroundTransparency = 0.3,
+		BorderSizePixel = 0,
+	}, resultCard)
+	corner(timelineFrame, 6)
+
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 164),
+		Size = UDim2.new(1, -28, 0, 14),
+		BackgroundTransparency = 1,
+		Text = "top bar: dash   green: in reach   accent: block   tick: M1 or hit",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Gotham,
+		TextSize = 9,
+	}, resultCard)
+	local summaryLabel = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 180),
+		Size = UDim2.new(1, -28, 0, 16),
+		BackgroundTransparency = 1,
+		Text = "No runs yet",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 11,
+	}, resultCard)
+
+	---Draw the timeline bars and ticks of a result.
+	---@param timeline table?
+	local function renderTimeline(timeline)
+		for _, child in ipairs(timelineFrame:GetChildren()) do
+			if child:IsA("GuiObject") then
+				child:Destroy()
+			end
+		end
+
+		if not timeline then
+			return
+		end
+
+		for _, bar in ipairs(timeline.bars) do
+			local from = math.clamp(bar.from / timeline.total, 0, 1)
+			local to = math.clamp(bar.to / timeline.total, 0, 1)
+			if to > from then
+				local frame = newInstance("Frame", {
+					Position = UDim2.new(from, 0, bar.lane * 0.5, bar.lane == 1 and 1 or 0),
+					Size = UDim2.new(to - from, 0, 0.5, -1),
+					BackgroundColor3 = bar.color,
+					BackgroundTransparency = 0.15,
+					BorderSizePixel = 0,
+				}, timelineFrame)
+				corner(frame, 3)
+			end
+		end
+
+		for _, tick in ipairs(timeline.ticks) do
+			newInstance("Frame", {
+				AnchorPoint = Vector2.new(0.5, 0),
+				Position = UDim2.new(math.clamp(tick.at / timeline.total, 0, 1), 0, 0, -3),
+				Size = UDim2.new(0, 3, 1, 6),
+				BackgroundColor3 = tick.color,
+				BorderSizePixel = 0,
+			}, timelineFrame)
+		end
+	end
+
+	---Show a lab result in the card.
+	---@param result table
+	local function showResult(result)
+		resultTitle.Text = result.title or "-"
+		resultTitle.TextColor3 = result.ok and COLORS.good or COLORS.bad
+
+		local lines = {}
+		for _, line in ipairs(result.lines or {}) do
+			if line ~= "" then
+				table.insert(lines, line)
+			end
+		end
+		resultDetail.Text = table.concat(lines, "\n")
+		summaryLabel.Text = result.summary or getLabSummary()
+		renderTimeline(result.timeline)
+	end
+	labResultCallback = showResult
+
+	local runOnce = newInstance("TextButton", {
+		Position = UDim2.fromOffset(14, 204),
+		Size = UDim2.fromOffset(108, 28),
+		BackgroundColor3 = COLORS.accent,
+		Text = "Run Test",
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, resultCard)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, runOnce)
+	addPress(runOnce)
+	connect(runOnce.MouseButton1Click, function()
+		if labRunning then
+			return
+		end
+
+		showResult({ title = "Running...", ok = true, lines = { "Testing " .. Settings.labTest .. "." }, summary = getLabSummary() })
+		startLab(1)
+	end)
+
+	local runBatch = newInstance("TextButton", {
+		Position = UDim2.fromOffset(130, 204),
+		Size = UDim2.fromOffset(108, 28),
+		BackgroundTransparency = 1,
+		Text = "Run x10",
+		TextColor3 = COLORS.text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, resultCard)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, runBatch)
+	outline(runBatch, 0.4, 1.5)
+	addPress(runBatch)
+	connect(runBatch.MouseButton1Click, function()
+		if labRunning then
+			return
+		end
+
+		showResult({ title = "Running...", ok = true, lines = { "Running 10 of " .. Settings.labTest .. "." }, summary = "" })
+		startLab(10)
+	end)
+
+	local scenario = addSection(lab, "Scenario")
+	addCycle(scenario, "Test", "What to simulate", "labTest", LAB_TEST_NAMES)
+	addSlider(scenario, "Start Distance", "Dash tests", "labDistance", 3, 25, 1, " studs")
+	addSlider(scenario, "Attack Distance", "Block tests", "labAttackDist", 3, 14, 1, " studs")
+	addSlider(scenario, "Simulated Ping", "Network delay", "labPing", 0, 250, 5, " ms")
+	addSlider(scenario, "Dash Speed", "Enemy dash speed", "labSpeed", 30, 100, 5, "")
+	addSlider(scenario, "True M1 Reach", "Includes the M1 lunge", "labReach", 3, 20, 0.5, " studs")
+	addSlider(scenario, "M1 Startup", "Click to hit delay", "labStartup", 0, 0.3, 0.01, "s")
+	addSlider(scenario, "Hit Frame", "Attack lands after", "labHit", 0.1, 0.8, 0.01, "s")
+	addSwitch(scenario, "Dry Run", "Don't send real inputs", "labDryRun")
+
+	local tune = addSection(lab, "Tune")
+	addSwitch(tune, "Auto Block", "Needed for block tests", "autoBlock")
+	addSlider(tune, "Block Lead", "React this early", "blockLead", 0, 0.3, 0.01, "s")
+	addSlider(tune, "Chain Tail", "Extra hold after a move", "blockTail", 0, 0.6, 0.05, "s")
+	addSlider(tune, "Hold Time", "Minimum time F is held", "blockHold", 0.1, 1, 0.05, "s")
+	addSwitch(tune, "Side Dash Auto M1", "Needed for side dash tests", "catchEnabled")
+	addSlider(tune, "Hit Reach", "M1 only fires inside this", "catchReach", 4, 30, 1, " studs")
+	addSwitch(tune, "Smart Timing", "Predict arrival, skip fixed delays", "catchSmart")
+	addSlider(tune, "Timing Offset", "Fire earlier (+) or later (-)", "catchOffset", -0.15, 0.25, 0.01, "s")
+	addSlider(tune, "Close Delay", "Wait before M1", "catchCloseDelay", 0, 0.6, 0.01, "s")
+	addSlider(tune, "Far Delay", "Wait before M1", "catchFarDelay", 0, 0.6, 0.01, "s")
+	addSwitch(tune, "Backdash Auto M1", "Needed for backdash tests", "bdcEnabled")
+	addSlider(tune, "Backdash Reach", "M1 only fires inside this", "bdcReach", 4, 30, 1, " studs")
+	addSlider(tune, "Backdash Delay", "Wait before M1", "bdcDelay", 0, 0.6, 0.01, "s")
+	addSwitch(tune, "Front Dash Block", "Needed for front dash tests", "frontBlock")
+	addSwitch(tune, "Side Dash Block", "Needed for the side dash block test", "dashPredict")
+	addSlider(tune, "Front Chain Tail", "Keep blocking after it ends", "frontTail", 0, 0.8, 0.05, "s")
+
+	local learnCard = addSection(lab, "Learn Animations")
+	addAction(learnCard, "Learn M1 String", "Then swing for 5 seconds", "Learn", function()
+		learning = "m1"
+		log("learning M1 string: swing now")
+		task.delay(5, function()
+			if learning == "m1" then
+				learning = nil
+				log("M1 learning finished")
+			end
+		end)
+	end)
+	addInfo(learnCard, "Learned M1", function()
+		return learning == "m1" and "swing now..." or (countLearned("m1") .. " ids")
+	end)
+
+	-- Dashes.
+	local dashPage = addPage("Dashes", 3, "💨")
+
+	local input = addSection(dashPage, "M1 Input")
+	addCycle(input, "M1 Method", "How M1s are sent", "m1Method", { "Remote+Mobile", "Remote", "Signal", "Button" })
+	addAction(input, "Test M1", "Send one M1", "Test", function()
+		clickM1("test")
+	end)
+
+	local side = addSection(dashPage, "Side Dash M1")
+	addSwitch(side, "Auto M1", "M1 on a side dash", "catchEnabled")
+	addSwitch(side, "Visualizer", "Rings and timing line", "catchVisual")
+	addSwitch(side, "Lock Target", "Face them during the catch", "catchFace")
+	addSwitch(side, "Ping Lead", "Look ahead by your ping", "catchPing")
+	addSwitch(side, "Smart Timing", "Predict arrival, skip fixed delays", "catchSmart")
+	addSlider(side, "Timing Offset", "Fire earlier (+) or later (-)", "catchOffset", -0.15, 0.25, 0.01, "s")
+	addSlider(side, "Assumed Speed", "Until their speed is measured", "catchSpeed", 20, 120, 1, "")
+	addInfo(side, "Measured Speed", function()
+		local parts = {}
+		for _, kind in ipairs({ "RIGHT", "LEFT", "BACK" }) do
+			if dashSpeeds[kind] then
+				table.insert(parts, string.format("%s %d", kind:sub(1, 1), dashSpeeds[kind]))
+			end
+		end
+
+		return #parts > 0 and table.concat(parts, "  ") or "none yet"
+	end)
+	addSwitch(side, "Zoned Delay", "Only used when Smart is off", "catchZones")
+	addSlider(side, "Max Range", "Far range", "catchRange", 5, 60, 1, " studs")
+	addSlider(side, "Hit Reach", "M1 only fires inside this", "catchReach", 4, 30, 1, " studs")
+	addSlider(side, "Close Range", "Close zone size", "catchCloseRange", 5, 40, 1, " studs")
+	addSlider(side, "Close Delay", "Wait before M1", "catchCloseDelay", 0, 0.6, 0.01, "s")
+	addSlider(side, "Far Delay", "Wait before M1", "catchFarDelay", 0, 0.6, 0.01, "s")
+	addSlider(side, "Delay", "When zones are off", "catchDelay", 0, 0.6, 0.01, "s")
+	addSlider(side, "Lock Time", "How long to lock on", "catchLock", 0.5, 2.5, 0.1, "s")
+
+	local back = addSection(dashPage, "Backdash M1")
+	addSwitch(back, "Enabled", "M1 on a backdash", "bdcEnabled")
+	addSlider(back, "Range", "How close they must be", "bdcRange", 5, 60, 1, " studs")
+	addSlider(back, "Hit Reach", "M1 only fires inside this", "bdcReach", 4, 30, 1, " studs")
+	addSlider(back, "Delay", "Wait before M1", "bdcDelay", 0, 0.6, 0.01, "s")
+	addAction(back, "Learn Backdash", "Then backdash yourself", "Learn", function()
+		learning = "back"
+		log("learning backdash: backdash now")
+	end)
+	addInfo(back, "Learned", function()
+		return learning == "back" and "waiting..." or (countLearned("back") .. " ids")
+	end)
+
+	local front = addSection(dashPage, "Front Dash Block")
+	addSwitch(front, "Enabled", "Block until the dash ends", "frontBlock")
+	addSwitch(front, "M1 On End", "M1 when the dash ends", "frontM1")
+	addSlider(front, "Range", "How close they must be", "frontRange", 5, 60, 1, " studs")
+	addSlider(front, "End M1 Range", "Max distance for the M1", "frontM1Range", 5, 60, 1, " studs")
+	addSlider(front, "Max Hold", "0 holds until it ends", "frontMaxHold", 0, 3, 0.1, "s")
+	addSlider(front, "Chain Tail", "Keep blocking after it ends", "frontTail", 0, 0.8, 0.05, "s")
+	addAction(front, "Learn Front Dash", "Then front dash yourself", "Learn", function()
+		learning = "front"
+		log("learning front dash: front dash now")
+	end)
+	addInfo(front, "Learned", function()
+		return learning == "front" and "waiting..." or (countLearned("front") .. " ids")
+	end)
+
+	local sideBlock = addSection(dashPage, "Side Dash Block")
+	addSwitch(sideBlock, "Predict And Block", "Pre-block side dashes (off if Auto M1 on)", "dashPredict")
+	addSlider(sideBlock, "Range", "How far to watch for dashes", "predictRange", 10, 40, 1, " studs")
+	addSlider(sideBlock, "Threat Reach", "Block if they get this close", "predictReach", 4, 20, 1, " studs")
+	addSlider(sideBlock, "Block After", "Keep blocking after arrival", "predictTail", 0, 1, 0.05, "s")
+
+	local counters = addSection(dashPage, "Counters")
+	addSwitch(counters, "Counter Bait", "No M1 into a counter", "counterBait")
+	addSwitch(counters, "Counter Punish", "M1 when a counter ends", "counterPunish")
+
+	-- Tech.
+	local techPage = addPage("Tech", 4, "⚙️")
+	local tech = addSection(techPage, "Tech On Uppercut")
+	addSwitch(tech, "Enabled", "Flick dash after your uppercut", "techLoop")
+	addAction(tech, "Learn Uppercut", "Then use your uppercut", "Learn", function()
+		learning = "uppercut"
+		log("learning uppercut: use your uppercut now")
+	end)
+	addSlider(tech, "Target Range", "Closest enemy inside", "techRange", 5, 80, 1, " studs")
+	addSlider(tech, "Start Delay", "After the uppercut", "techStartDelay", 0, 0.6, 0.01, "s")
+	addSlider(tech, "Start Flick", "Angle", "techStart", -180, 180, 5, "°")
+	addSlider(tech, "Second Flick", "Angle", "techSecond", -180, 180, 5, "°")
+	addSlider(tech, "Second Delay", "After the dash", "techSecondDelay", 0, 0.3, 0.01, "s")
+	addSlider(tech, "Third Flick", "Angle", "techThird", -180, 180, 5, "°")
+	addSlider(tech, "Third Delay", "After the dash", "techThirdDelay", 0, 0.6, 0.01, "s")
+	addSwitch(tech, "Jump", "Jump during the dash", "techJump")
+	addSwitch(tech, "Rotate Camera", "Flick the camera too", "techCamera")
+
+	-- Visuals.
+	local visualsPage = addPage("Visuals", 5, "👁")
+	local esp = addSection(visualsPage, "Players")
+	addSwitch(esp, "ESP", "Highlight and health", "esp")
+	addSwitch(esp, "Self Chams", "Highlight yourself", "selfChams")
+	addSwitch(esp, "Safe-to-Hit", "Open, punish, counter markers", "safeIndicator")
+	addSlider(esp, "Safe Range", "Marker distance", "safeRange", 10, 60, 1, " studs")
+	addSwitch(esp, "Combo Counter", "Hit streak pill", "comboCounter")
+
+	local world = addSection(visualsPage, "World")
+	addSwitch(world, "Custom FOV", "Override field of view", "fovEnabled")
+	addSlider(world, "Field of View", "Degrees", "fov", 40, 120, 1, "°")
+	addSwitch(world, "No Smoke", "Hide smoke and dust", "noSmoke")
+	addSwitch(world, "No Shadows", "Turn global shadows off", "noShadows")
+
+	-- Whitelist.
+	local whitelistPage = addPage("Whitelist", 6, "✅")
+	local friends = addSection(whitelistPage, "Friends")
+	addSwitch(friends, "Friend Check", "Skip Roblox friends", "friendCheck")
+
+	local playersCard = addSection(whitelistPage, "Players")
+	local function refreshWhitelist()
+		for _, child in ipairs(playersCard:GetChildren()) do
+			if child:IsA("GuiObject") then
+				child:Destroy()
+			end
+		end
+
+		local added = false
+		for _, player in ipairs(playersService:GetPlayers()) do
+			if player ~= localPlayer then
+				local key = "wl_" .. player.Name
+				if Settings[key] == nil then
+					Settings[key] = false
+				end
+
+				addSwitch(playersCard, player.Name, "Skipped by every feature", key)
+				added = true
+			end
+		end
+
+		if not added then
+			createRow(playersCard, "No other players", nil, "Frame")
+		end
+	end
+
+	refreshWhitelist()
+	connect(playersService.PlayerAdded, function()
+		task.delay(0.3, refreshWhitelist)
+	end)
+	connect(playersService.PlayerRemoving, function()
+		task.delay(0.3, refreshWhitelist)
+	end)
+
+	-- Misc.
+	local miscPage = addPage("Misc", 7, "☰")
+	local interface = addSection(miscPage, "Interface")
+	addSwitch(interface, "Quick Pills", "Toggle buttons on the left", "quickPills")
+	addSwitch(interface, "Indicators", "Active feature list", "indicators")
+
+	local presets = addSection(miscPage, "Presets")
+	addCycle(presets, "Slot", "Preset slot", "presetSlot", { "Slot 1", "Slot 2", "Slot 3" })
+	addAction(presets, "Save", "Store current settings", "Save", savePreset)
+	addAction(presets, "Load", "Restore saved settings", "Load", loadPreset)
+	addInfo(presets, "Status", function()
+		return presetStatus
+	end)
+
+	local data = addSection(miscPage, "Data")
+	addAction(data, "Reset Learned", "Clears timings and moves", "Reset", function()
+		table.clear(moveData)
+		table.clear(learned.barrage)
+		table.clear(learned.shove)
+		table.clear(learned.uppercut)
+		table.clear(learned.back)
+		table.clear(learned.front)
+		table.clear(learned.m1)
+		table.clear(dashSpeeds)
+	end)
+	addAction(data, "Unload", "Remove Zenny", "Unload", function()
+		Zenny.detach()
+	end)
+
+	-- Debug.
+	local debugPage = addPage("Debug", 8, "🐞")
+	local tools = addSection(debugPage, "Tools")
+	addInfo(tools, "Input remote", function()
+		return getRemote() and "found" or "MISSING"
+	end)
+	addAction(tools, "Test M1", "Fire one M1", "Test", function()
+		clickM1("test")
+	end)
+	addAction(tools, "Test All M1", "Tries every method in turn", "Run", testAllM1)
+	addAction(tools, "Scan Buttons", "List on-screen buttons", "Scan", scanButtons)
+	addAction(tools, "Test Block", "Hold F briefly", "Test", function()
+		pressBlock(0.5)
+	end)
+	addAction(tools, "Scan Remotes", "List remotes in the log", "Scan", scanRemotes)
+	addAction(tools, "Clear Log", "Empty the log", "Clear", function()
+		table.clear(logLines)
+	end)
+	addSwitch(tools, "Console Log", "Also print to the console", "debugConsole")
+
+	local logCard = addSection(debugPage, "Log")
+	local logLabel = newInstance("TextLabel", {
+		Size = UDim2.new(1, -24, 0, 0),
+		Position = UDim2.fromOffset(12, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		Text = "",
+		TextColor3 = COLORS.dim,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Font = Enum.Font.Code,
+		TextSize = 11,
+		LayoutOrder = 1,
+	}, logCard)
+	newInstance("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }, logCard)
+
+	connect(bell.MouseButton1Click, function()
+		selectTab("Debug")
+	end)
+
+	-- Search filters rows on every page and jumps to a page with matches.
+	local function applySearch(query)
+		query = query:lower()
+		local counts = {}
+		local visibleCards = {}
+
+		for _, entry in ipairs(rowRegistry) do
+			if entry.row.Parent then
+				local match = query == "" or entry.title:find(query, 1, true) ~= nil
+				entry.row.Visible = match
+
+				if match then
+					visibleCards[entry.card] = true
+					local pageName = pageOfScroll[entry.card.Parent]
+					if pageName then
+						counts[pageName] = (counts[pageName] or 0) + 1
+					end
+				end
+			end
+		end
+
+		for card, header in pairs(sectionHeaders) do
+			if card.Parent then
+				local visible = query == "" or visibleCards[card] == true
+				card.Visible = visible
+				header.Visible = visible
+			end
+		end
+
+		return counts
+	end
+
+	connect(searchBox:GetPropertyChangedSignal("Text"), function()
+		local counts = applySearch(searchBox.Text)
+		if searchBox.Text ~= "" and not counts[activeTab] then
+			for _, name in ipairs(tabOrder) do
+				if counts[name] then
+					selectTab(name)
+					break
+				end
+			end
+		end
+	end)
+
+	-- Refresh the home stats, info rows and log twice a second.
+	local frames, statsElapsed = 0, 0
+	local fpsHistory = {}
+	connect(runService.Heartbeat, function(delta)
+		frames += 1
+		statsElapsed += delta
+		if statsElapsed < 0.5 then
+			return
+		end
+
+		local fps = frames / statsElapsed
+		frames, statsElapsed = 0, 0
+
+		table.insert(fpsHistory, fps)
+		if #fpsHistory > #fpsBars then
+			table.remove(fpsHistory, 1)
+		end
+
+		fpsValue.Text = string.format("%d", fps)
+		for index, bar in ipairs(fpsBars) do
+			local sample = fpsHistory[index] or 0
+			tween(bar, { Size = UDim2.new(1 / #fpsBars, -2, math.clamp(sample / 70, 0.08, 1), 0) }, QUICK)
+		end
+
+		local active = 0
+		for _, info in ipairs(INDICATOR_LIST) do
+			if Settings[info[1]] then
+				active += 1
+			end
+		end
+		moduleValue.Text = tostring(active)
+		for index, bar in ipairs(moduleBars) do
+			local lit = index <= math.ceil(active / (#INDICATOR_LIST / #moduleBars))
+			tween(bar, {
+				Size = UDim2.new(1 / #moduleBars, -2, 0.2 + 0.8 * index / #moduleBars, 0),
+				BackgroundTransparency = (lit and active > 0) and 0.1 or 0.7,
+			}, QUICK)
+		end
+
+		runtimeValue.Text = formatRuntime(os.clock() - loadedAt)
+		for index, bar in ipairs(runtimeBars) do
+			tween(bar, { Size = UDim2.new(1 / #runtimeBars, -2, 0.25 + 0.5 * math.abs(math.sin(os.clock() / 3 + index)), 0) }, SMOOTH)
+		end
+
+		for _, tile in ipairs(tiles) do
+			local on = Settings[tile.key]
+			tween(tile.tile, { BackgroundColor3 = on and COLORS.accentDark or COLORS.off, BackgroundTransparency = on and 0.35 or 0.45 }, QUICK)
+			tween(tile.stroke, { Transparency = on and 0.1 or 0.85 }, QUICK)
+		end
+
+		local remoteFound = getRemote() ~= nil
+		statusDot.BackgroundColor3 = remoteFound and COLORS.accent or COLORS.bad
+		statusText.Text = remoteFound and "All Systems Operational" or "Input remote missing"
+		statusDetail.Text = string.format("Ping %d ms\nLearned %d moves", getPing(), countLearned("barrage") + countLearned("shove") + countLearned("uppercut"))
+
+		for _, info in ipairs(infoRows) do
+			if info.label.Parent then
+				info.label.Text = info.get()
+			end
+		end
+
+		if activeTab == "Debug" then
+			local first = math.max(#logLines - 24, 1)
+			logLabel.Text = table.concat(logLines, "\n", first, #logLines)
+		end
+	end)
+
+	-- Open and close with a fade and scale.
+	local windowOpen = false
+	local function setWindowOpen(state)
+		windowOpen = state
+		if state then
+			window.Visible = true
+		else
+			task.delay(0.22, function()
+				if not windowOpen then
+					window.Visible = false
+				end
+			end)
+		end
+
+		tween(window, { GroupTransparency = state and 0 or 1 })
+		tween(windowScale, { Scale = state and 1 or 0.94 })
+	end
+
+	connect(minimizeButton.MouseButton1Click, function()
+		setWindowOpen(false)
+	end)
+
+	-- Close needs a second tap so it is not hit by accident.
+	local closeArmed = false
+	connect(closeButton.MouseButton1Click, function()
+		if closeArmed then
+			Zenny.detach()
+			return
+		end
+
+		closeArmed = true
+		closeButton.TextColor3 = COLORS.bad
+		task.delay(2, function()
+			closeArmed = false
+			if closeButton.Parent then
+				closeButton.TextColor3 = COLORS.dim
+			end
+		end)
+	end)
+
+	-- Floating opener for when the window is hidden.
+	local opener = newInstance("TextButton", {
+		Position = UDim2.fromOffset(12, math.floor(viewport.Y / 2) - 20),
+		Size = UDim2.fromOffset(44, 44),
+		BackgroundColor3 = COLORS.accent,
+		Text = "Z",
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 20,
+		AutoButtonColor = false,
+	}, gui)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, opener)
+	newInstance("UIStroke", { Color = COLORS.accent, Transparency = 0.5, Thickness = 3 }, opener)
+	addPress(opener)
+	connect(opener.MouseButton1Click, function()
+		setWindowOpen(not windowOpen)
+	end)
+
+	connect(userInputService.InputBegan, function(input, processed)
+		if not processed and input.KeyCode == TOGGLE_KEY then
+			setWindowOpen(not windowOpen)
+		end
+	end)
+
+	-- Drag the window from the top bar or the logo.
+	local dragStart, startPosition
+	local function beginDrag(input)
+		if isPointer(input) then
+			dragStart, startPosition = input.Position, window.Position
+		end
+	end
+	connect(topBar.InputBegan, beginDrag)
+	connect(logoRow.InputBegan, beginDrag)
+	connect(userInputService.InputChanged, function(input)
+		if dragStart and isPointerMove(input) then
+			local delta = input.Position - dragStart
+			local screen = workspace.CurrentCamera.ViewportSize
+			local x = math.clamp(startPosition.X.Offset + delta.X, 0, math.max(screen.X - width, 0))
+			local y = math.clamp(startPosition.Y.Offset + delta.Y, 0, math.max(screen.Y - height, 0))
+			window.Position = UDim2.fromOffset(x, y)
+		end
+	end)
+	connect(userInputService.InputEnded, function(input)
+		if dragStart and isPointer(input) then
+			dragStart = nil
+		end
+	end)
+
+	-- Quick toggle pills for fast changes mid-fight.
+	local quick = newInstance("Frame", {
+		Position = UDim2.fromOffset(12, math.floor(viewport.Y / 2) + 34),
+		Size = UDim2.fromOffset(96, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+	}, gui)
+	newInstance("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, quick)
+
+	local quickEntries = {}
+	for index, info in ipairs({ { "Block", "autoBlock" }, { "Evasive", "autoEvasive" }, { "Catch", "catchEnabled" }, { "Lock", "catchFace" } }) do
+		local pill = newInstance("TextButton", {
+			Size = UDim2.fromOffset(96, 30),
+			BackgroundColor3 = COLORS.off,
+			BackgroundTransparency = 0.3,
+			Text = info[1],
+			TextColor3 = COLORS.dim,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 13,
+			AutoButtonColor = false,
+			LayoutOrder = index,
+		}, quick)
+		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, pill)
+		local stroke = newInstance("UIStroke", { Color = COLORS.accent, Transparency = 0.7, Thickness = 1 }, pill)
+		addPress(pill)
+		quickEntries[index] = { pill = pill, stroke = stroke, key = info[2] }
+
+		connect(pill.MouseButton1Click, function()
+			Settings[info[2]] = not Settings[info[2]]
+			local refresh = uiRefreshers[info[2]]
+			if refresh then
+				refresh(true)
+			end
+			onSettingChanged(info[2])
+		end)
+	end
+
+	local quickElapsed = 0
+	connect(runService.Heartbeat, function(delta)
+		quickElapsed += delta
+		if quickElapsed < 0.15 then
+			return
+		end
+
+		quickElapsed = 0
+		quick.Visible = Settings.quickPills
+
+		for _, entry in ipairs(quickEntries) do
+			local on = Settings[entry.key]
+			if entry.shown ~= on then
+				entry.shown = on
+				tween(entry.pill, {
+					BackgroundColor3 = on and COLORS.accent or COLORS.off,
+					BackgroundTransparency = on and 0.1 or 0.3,
+					TextColor3 = on and COLORS.ink or COLORS.dim,
+				})
+				tween(entry.stroke, { Transparency = on and 0.2 or 0.7 })
+			end
+		end
+	end)
+
+	-- Active feature list on the left.
+	local indicatorLabel = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 96),
+		Size = UDim2.fromOffset(190, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.accent,
+		TextStrokeTransparency = 0.5,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+		Text = "",
+	}, gui)
+
+	local indicatorElapsed = 0
+	connect(runService.Heartbeat, function(delta)
+		indicatorElapsed += delta
+		if indicatorElapsed < 0.25 then
+			return
+		end
+
+		indicatorElapsed = 0
+		indicatorLabel.Visible = Settings.indicators
+
+		local lines = {}
+		for _, info in ipairs(INDICATOR_LIST) do
+			if Settings[info[1]] then
+				table.insert(lines, info[2])
+			end
+		end
+		indicatorLabel.Text = table.concat(lines, "\n")
+	end)
+
+	selectTab("Home")
+	setWindowOpen(true)
+end
+
+---Initialize the script.
+function Zenny.init()
+	buildGui()
+
+	connect(runService.Heartbeat, function()
+		scanOwn()
+		scanEnemies()
+		updateThreats()
+		updateDashes()
+		updateEvasive()
+		updatePreBlock()
+		updateBlockController()
+		updateCounterBait()
+		updateLockFrame()
+		updateEsp()
+		updateSelfChams()
+		updateSafeIndicator()
+		updateComboCounter()
+	end)
+
+	connect(runService.RenderStepped, function()
+		local camera = workspace.CurrentCamera
+		if Settings.fovEnabled and camera then
+			camera.FieldOfView = Settings.fov
+		end
+	end)
+
+	connect(workspace.DescendantAdded, onDescendantAdded)
+	connect(playersService.PlayerRemoving, removeEsp)
+
+	log("Zenny loaded; input remote " .. (getRemote() and "found" or "missing"))
+end
+
+---Tear everything down and restore touched state.
+function Zenny.detach()
+	for _, connection in ipairs(connections) do
+		connection:Disconnect()
+	end
+	table.clear(connections)
+
+	for player in pairs(espObjects) do
+		removeEsp(player)
+	end
+
+	for track in pairs(dashes) do
+		untrackDash(track, true)
+	end
+
+	for _, entry in pairs(moves) do
+		if entry.holding then
+			entry.holding = false
+			releaseBlock()
+		end
+	end
+	table.clear(moves)
+	table.clear(infoRows)
+	table.clear(rowRegistry)
+
+	if blockDown then
+		local remote = getRemote()
+		if remote then
+			remote:FireServer({ Goal = "KeyRelease", Key = BLOCK_KEY })
+		end
+		blockDown = false
+	end
+
+	labRun = nil
+	removeLabDummy()
+	stopLock()
+	lightingService.GlobalShadows = originalShadows
+
+	if gui then
+		gui:Destroy()
+	end
+end
+
+---@param error string
+local function onInitializeError(error)
+	warn("Zenny failed to initialize.")
+	warn(error)
+	warn(debug.traceback())
+	Zenny.detach()
+end
+
+-- Shared-state singleton.
+if shared.Zenny then
+	shared.Zenny.detach()
+end
+shared.Zenny = Zenny
+
+xpcall(Zenny.init, onInitializeError)
