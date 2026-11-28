@@ -6547,8 +6547,13 @@ end
 ---@param input InputObject
 ---@param processed boolean
 function Bot.onKey(input, processed)
+	-- Taps and clicks carry KeyCode.Unknown; only real keyboard keys may bind or toggle.
+	if input.UserInputType ~= Enum.UserInputType.Keyboard or input.KeyCode == Enum.KeyCode.Unknown then
+		return
+	end
+
 	-- A keybind row is waiting for its key.
-	if bindCapture and input.UserInputType == Enum.UserInputType.Keyboard then
+	if bindCapture then
 		bindCapture(input.KeyCode)
 		return
 	end
@@ -6572,9 +6577,24 @@ function Bot.onKey(input, processed)
 		Bot.playSelected()
 	else
 		for _, bind in ipairs(TOGGLE_BINDS) do
-			if Settings[bind.key] == code.Name then
+			local bound = Settings[bind.key]
+			if bound ~= "None" and bound ~= "Unknown" and bound == code.Name then
+				warn(string.format("Zenny toggle: %s via %s %s", bind.title, input.UserInputType.Name, code.Name))
 				Bot.toggle(bind)
 				break
+			end
+		end
+	end
+end
+
+---Reset toggle keybinds that were saved as Unknown, which every screen tap matches.
+function Bot.cleanBinds()
+	for _, bind in ipairs(TOGGLE_BINDS) do
+		if Settings[bind.key] == "Unknown" then
+			Settings[bind.key] = "None"
+			local refresh = uiRefreshers[bind.key]
+			if refresh then
+				refresh(true)
 			end
 		end
 	end
@@ -6657,6 +6677,7 @@ local function loadPreset()
 		end
 	end
 
+	Bot.cleanBinds()
 	onSettingChanged("preset")
 	presetStatus = "Loaded " .. Settings.presetSlot
 end
@@ -9752,6 +9773,7 @@ end
 ---Initialize the script.
 function Zenny.init()
 	Zenny.buildGui()
+	Bot.cleanBinds()
 
 	connect(runService.Heartbeat, function(delta)
 		Zenny.updateLag(delta)
