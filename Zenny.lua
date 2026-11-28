@@ -157,7 +157,6 @@ local Bot = {
 		catchEnabled = true,
 		catchSmart = true,
 		bdcEnabled = true,
-		preBlock = false,
 		shoveM1 = true,
 	},
 }
@@ -264,8 +263,6 @@ local Settings = {
 	faceCheck = false,
 	selfGrace = 0.1,
 	blockTail = 0.25,
-	preBlock = false,
-	preBlockRange = 8,
 	autoEvasive = false,
 	evasiveMode = "Ragdoll",
 	evasiveDirection = "Back",
@@ -389,7 +386,6 @@ local Settings = {
 	comboCancel = true,
 	styleUse = true,
 	styleLearnSelf = false,
-	padVisible = true,
 	backStepRange = 11,
 	backStepDelay = 0.05,
 	botStringHits = 4,
@@ -1334,7 +1330,7 @@ local function onDashTrack(ctx)
 	if kind == "BACK" then
 		enabled, range = Settings.bdcEnabled, Settings.bdcRange
 	elseif kind == "FRONT" then
-		enabled, range = Settings.frontBlock, Settings.frontRange
+		enabled, range = Settings.autoBlock and Settings.frontBlock, Settings.frontRange
 	else
 		enabled = Settings.catchEnabled or Settings.catchVisual or Settings.catchFace or Settings.dashPredict
 		range = math.max(Settings.catchRange, Settings.dashPredict and Settings.predictRange or 0)
@@ -1367,7 +1363,7 @@ local function onDashTrack(ctx)
 
 	if kind == "FRONT" then
 		-- Block until the dash ends, if it is heading at us.
-		if (ctx.distance < 10 or ctx.root.CFrame.LookVector:Dot(ctx.offset.Unit) > -0.1) and holdBlock() then
+		if ctx.root.CFrame.LookVector:Dot(ctx.offset.Unit) > -0.1 and holdBlock() then
 			entry.holding = true
 			log("front dash: holding block")
 		end
@@ -1786,38 +1782,6 @@ local function updateThreats()
 					pressBlock(duration + Settings.blockTail)
 				end
 			end
-		end
-	end
-end
-
----Hold block while an enemy is close and facing us, so the first hit is blocked.
-local function updatePreBlock()
-	if not Settings.preBlock then
-		return
-	end
-
-	local myCharacter, myRoot = getMe()
-	local now = os.clock()
-	if not myRoot or now < ownActionUntil then
-		return
-	end
-
-	local container = workspace:FindFirstChild("Live") or workspace
-	for _, character in ipairs(container:GetChildren()) do
-		if character == myCharacter or not character:IsA("Model") or isIgnored(character) then
-			continue
-		end
-
-		local root = character:FindFirstChild("HumanoidRootPart")
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if not (root and humanoid and humanoid.Health > 0) or character:FindFirstChild("Ragdoll") then
-			continue
-		end
-
-		local offset = myRoot.Position - root.Position
-		if offset.Magnitude <= Settings.preBlockRange and offset.Magnitude > 0 and root.CFrame.LookVector:Dot(offset.Unit) > 0.3 then
-			requestBlock(0.2)
-			return
 		end
 	end
 end
@@ -3428,8 +3392,9 @@ function Bot.updateLockTarget(myCharacter, myRoot, now)
 		end
 	end
 
+	-- Shift lock turns the character with the camera, so the camera lock does the facing there.
 	local root = Bot.lockTarget and Bot.getParts(Bot.lockTarget)
-	if root and not Bot.active and Settings.lockFaceChar and not techBusy then
+	if root and not Bot.active and Settings.lockFaceChar and not techBusy and not Bot.shiftLockOn() then
 		startLock(root, true)
 	end
 end
@@ -3452,6 +3417,22 @@ function Bot.updateCamera(delta)
 		aim += root.AssemblyLinearVelocity * 0.05
 	end
 
+	-- Shift lock: the camera sits off the shoulder, so aim from where it is and turn the character with it.
+	if Bot.shiftLockOn() then
+		local position = camera.CFrame.Position
+		local goal = CFrame.lookAt(position, aim)
+		camera.CFrame = camera.CFrame:Lerp(goal, math.clamp(delta * Settings.lockSpeed * 1.5, 0, 1))
+
+		local myRoot = Bot.myRoot
+		if Settings.lockFaceChar and myRoot and myRoot.Parent and not techBusy then
+			local flat = (aim - myRoot.Position) * Vector3.new(1, 0, 1)
+			if flat.Magnitude > 0.1 then
+				myRoot.CFrame = CFrame.lookAt(myRoot.Position, myRoot.Position + flat)
+			end
+		end
+		return
+	end
+
 	-- Orbit the camera's focus so the zoom distance is kept.
 	local focus = camera.Focus.Position
 	local direction = aim - focus
@@ -3462,6 +3443,19 @@ function Bot.updateCamera(delta)
 	local zoom = (camera.CFrame.Position - focus).Magnitude
 	local goal = CFrame.lookAt(focus - direction.Unit * zoom, focus)
 	camera.CFrame = camera.CFrame:Lerp(goal, math.clamp(delta * Settings.lockSpeed, 0, 1))
+end
+
+---Whether shift lock is on, so the camera is what turns the character.
+---@return boolean
+function Bot.shiftLockOn()
+	if userInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then
+		return true
+	end
+
+	local ok, rotation = pcall(function()
+		return UserSettings():GetService("UserGameSettings").RotationType
+	end)
+	return ok and rotation == Enum.RotationType.CameraRelative
 end
 
 ---Pick who the dash assist aims at.
@@ -6395,13 +6389,13 @@ local function addSection(page, title)
 	local card = newInstance("Frame", {
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = COLORS.card,
-		BackgroundTransparency = 0.2,
+		BackgroundColor3 = Color3.fromRGB(8, 8, 10),
+		BackgroundTransparency = 0.08,
 		BorderSizePixel = 0,
 		LayoutOrder = nextOrder(page),
 	}, page)
 	corner(card, 14)
-	outline(card, 0.82)
+	outline(card, 0.72, 1)
 	newInstance("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, card)
 
 	sectionHeaders[card] = header
@@ -6746,8 +6740,9 @@ local function buildGui()
 	local loadedAt = os.clock()
 	local camera = workspace.CurrentCamera
 	local viewport = camera and camera.ViewportSize or Vector2.new(800, 400)
-	local width = math.min(viewport.X - 24, 720)
-	local height = math.min(viewport.Y - 24, 380)
+	local width = math.min(viewport.X - 24, 860)
+	local height = math.min(viewport.Y - 24, 500)
+	local compact = viewport.X < 620
 	local mainWidth = width - 20
 
 	local window = newInstance("CanvasGroup", {
@@ -6870,6 +6865,36 @@ local function buildGui()
 		Size = UDim2.new(1, -20, 1, -20),
 		BackgroundTransparency = 1,
 	}, window)
+
+	-- PHANTOM rail: a quiet glass spine that separates navigation from the workspace.
+	if not compact then
+		local rail = newInstance("Frame", {
+			Name = "PhantomRail",
+			Position = UDim2.fromOffset(0, 46),
+			Size = UDim2.new(0, 108, 1, -46),
+			BackgroundColor3 = Color3.fromRGB(7, 7, 9),
+			BackgroundTransparency = 0.12,
+			BorderSizePixel = 0,
+		}, main)
+		corner(rail, 17)
+		outline(rail, 0.78, 1)
+		local railGlow = newInstance("Frame", {
+			Position = UDim2.new(1, -2, 0, 14),
+			Size = UDim2.new(0, 1, 1, -28),
+			BackgroundColor3 = COLORS.accent,
+			BackgroundTransparency = 0.72,
+			BorderSizePixel = 0,
+		}, rail)
+		newInstance("UIGradient", {
+			Rotation = 90,
+			Transparency = NumberSequence.new({
+				NumberSequenceKeypoint.new(0, 1),
+				NumberSequenceKeypoint.new(0.18, 0.15),
+				NumberSequenceKeypoint.new(0.82, 0.15),
+				NumberSequenceKeypoint.new(1, 1),
+			}),
+		}, railGlow)
+	end
 
 	local topBar = newInstance("Frame", {
 		Size = UDim2.new(1, 0, 0, 40),
@@ -7030,25 +7055,29 @@ local function buildGui()
 
 	-- Horizontal tab strip under the top bar.
 	local nav = newInstance("ScrollingFrame", {
-		Position = UDim2.fromOffset(0, 44),
-		Size = UDim2.new(1, 0, 0, 34),
+		Position = compact and UDim2.fromOffset(0, 44) or UDim2.fromOffset(0, 52),
+		Size = compact and UDim2.new(1, 0, 0, 34) or UDim2.new(0, 108, 1, -104),
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		ScrollBarThickness = 0,
-		AutomaticCanvasSize = Enum.AutomaticSize.X,
+		AutomaticCanvasSize = compact and Enum.AutomaticSize.X or Enum.AutomaticSize.Y,
 		CanvasSize = UDim2.new(),
-		ScrollingDirection = Enum.ScrollingDirection.X,
+		ScrollingDirection = compact and Enum.ScrollingDirection.X or Enum.ScrollingDirection.Y,
 	}, main)
 	newInstance("UIListLayout", {
-		FillDirection = Enum.FillDirection.Horizontal,
-		Padding = UDim.new(0, 6),
+		FillDirection = compact and Enum.FillDirection.Horizontal or Enum.FillDirection.Vertical,
+		Padding = UDim.new(0, compact and 6 or 7),
 		SortOrder = Enum.SortOrder.LayoutOrder,
-		VerticalAlignment = Enum.VerticalAlignment.Center,
+		VerticalAlignment = compact and Enum.VerticalAlignment.Center or Enum.VerticalAlignment.Top,
 	}, nav)
-	newInstance("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 2) }, nav)
+	newInstance("UIPadding", {
+		PaddingLeft = UDim.new(0, compact and 2 or 6),
+		PaddingRight = UDim.new(0, compact and 2 or 6),
+		PaddingTop = UDim.new(0, compact and 0 or 10),
+	}, nav)
 
 	local unload = newInstance("TextButton", {
-		Size = UDim2.fromOffset(70, 28),
+		Size = compact and UDim2.fromOffset(70, 28) or UDim2.new(1, -4, 0, 32),
 		BackgroundTransparency = 1,
 		Text = "Unload",
 		TextColor3 = COLORS.accent,
@@ -7065,8 +7094,8 @@ local function buildGui()
 	end)
 
 	local content = newInstance("Frame", {
-		Position = UDim2.fromOffset(0, 84),
-		Size = UDim2.new(1, 0, 1, -84),
+		Position = compact and UDim2.fromOffset(0, 84) or UDim2.fromOffset(124, 48),
+		Size = compact and UDim2.new(1, 0, 1, -84) or UDim2.new(1, -124, 1, -48),
 		BackgroundTransparency = 1,
 	}, main)
 
@@ -7100,24 +7129,28 @@ local function buildGui()
 
 	local function addPage(name, order, icon)
 		local tab = newInstance("TextButton", {
-			Size = UDim2.fromOffset(0, 28),
-			AutomaticSize = Enum.AutomaticSize.X,
+			Size = compact and UDim2.fromOffset(0, 28) or UDim2.new(1, -4, 0, 36),
+			AutomaticSize = compact and Enum.AutomaticSize.X or Enum.AutomaticSize.None,
 			BackgroundColor3 = COLORS.accent,
 			BackgroundTransparency = 1,
 			Text = icon .. "  " .. name,
+			TextXAlignment = compact and Enum.TextXAlignment.Center or Enum.TextXAlignment.Left,
 			TextColor3 = COLORS.dim,
 			Font = Enum.Font.GothamMedium,
 			TextSize = 13,
 			AutoButtonColor = false,
 			LayoutOrder = order,
 		}, nav)
-		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, tab)
-		newInstance("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }, tab)
+		newInstance("UICorner", { CornerRadius = UDim.new(0, compact and 14 or 11) }, tab)
+		newInstance("UIPadding", {
+			PaddingLeft = UDim.new(0, compact and 14 or 10),
+			PaddingRight = UDim.new(0, compact and 14 or 6),
+		}, tab)
 
 		local indicator = newInstance("Frame", {
-			AnchorPoint = Vector2.new(0.5, 1),
-			Position = UDim2.new(0.5, 0, 1, 0),
-			Size = UDim2.new(0.5, 0, 0, 2),
+			AnchorPoint = compact and Vector2.new(0.5, 1) or Vector2.new(0, 0.5),
+			Position = compact and UDim2.new(0.5, 0, 1, 0) or UDim2.new(0, 3, 0.5, 0),
+			Size = compact and UDim2.new(0.5, 0, 0, 2) or UDim2.new(0, 2, 0.58, 0),
 			BackgroundColor3 = COLORS.accent,
 			BackgroundTransparency = 1,
 			BorderSizePixel = 0,
@@ -7202,7 +7235,7 @@ local function buildGui()
 		Position = UDim2.fromOffset(20, 80),
 		Size = UDim2.fromOffset(260, 20),
 		BackgroundTransparency = 1,
-		Text = "Smarter. Faster. Stronger.",
+		Text = "PHANTOM  //  SYSTEM ONLINE",
 		TextColor3 = COLORS.accent,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
@@ -7212,7 +7245,7 @@ local function buildGui()
 		Position = UDim2.fromOffset(20, 102),
 		Size = UDim2.fromOffset(250, 16),
 		BackgroundTransparency = 1,
-		Text = "Your TSB combat assistant.",
+		Text = "A sharper interface for Slotted.",
 		TextColor3 = COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.Gotham,
@@ -7709,7 +7742,6 @@ local function buildGui()
 		addAction(lock, "Next Target", "Cycle with V", "Next", function()
 			Bot.cycleLock()
 		end)
-		addSwitch(lock, "Quick Buttons", "Touch pad on the right edge", "padVisible")
 		addSwitch(lock, "Camera Lock", "Turn the camera at them", "lockCamera")
 		addSwitch(lock, "Face Them", "Turn your character at them", "lockFaceChar")
 		addSwitch(lock, "Lead Movement", "Aim slightly ahead of them", "lockPredict")
@@ -8423,120 +8455,6 @@ local function buildGui()
 		setWindowOpen(not windowOpen)
 	end)
 
-	-- Touch pad: lock, next target, bot, combo and stop, draggable by its handle.
-	do
-		local pad = newInstance("Frame", {
-			Position = UDim2.fromOffset(math.max(viewport.X - 72, 0), math.max(math.floor(viewport.Y / 2) - 150, 0)),
-			Size = UDim2.fromOffset(56, 0),
-			AutomaticSize = Enum.AutomaticSize.Y,
-			BackgroundTransparency = 1,
-		}, gui)
-		newInstance("UIListLayout", {
-			Padding = UDim.new(0, 8),
-			HorizontalAlignment = Enum.HorizontalAlignment.Center,
-			SortOrder = Enum.SortOrder.LayoutOrder,
-		}, pad)
-
-		local status = newInstance("TextLabel", {
-			Position = UDim2.fromOffset(-190, 0),
-			Size = UDim2.fromOffset(184, 40),
-			BackgroundColor3 = COLORS.card,
-			BackgroundTransparency = 0.15,
-			TextColor3 = COLORS.text,
-			TextWrapped = true,
-			Font = Enum.Font.GothamMedium,
-			TextSize = 12,
-			Visible = false,
-		}, pad)
-		newInstance("UICorner", { CornerRadius = UDim.new(0, 10) }, status)
-
-		local handle = newInstance("TextButton", {
-			Size = UDim2.fromOffset(56, 22),
-			BackgroundColor3 = COLORS.card,
-			BackgroundTransparency = 0.15,
-			Text = "• • •",
-			TextColor3 = COLORS.dim,
-			Font = Enum.Font.GothamBold,
-			TextSize = 12,
-			AutoButtonColor = false,
-			LayoutOrder = 0,
-		}, pad)
-		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, handle)
-
-		local dragOrigin, padOrigin = nil, nil
-		connect(handle.InputBegan, function(input)
-			if isPointer(input) then
-				dragOrigin, padOrigin = input.Position, pad.Position
-			end
-		end)
-		connect(userInputService.InputChanged, function(input)
-			if dragOrigin and isPointerMove(input) then
-				local delta = input.Position - dragOrigin
-				pad.Position = UDim2.fromOffset(padOrigin.X.Offset + delta.X, padOrigin.Y.Offset + delta.Y)
-			end
-		end)
-		connect(userInputService.InputEnded, function(input)
-			if dragOrigin and isPointer(input) then
-				dragOrigin = nil
-			end
-		end)
-
-		local lit = {}
-		local function addPadButton(order, text, callback, isOn)
-			local button = newInstance("TextButton", {
-				Size = UDim2.fromOffset(52, 52),
-				BackgroundColor3 = COLORS.card,
-				Text = text,
-				TextColor3 = COLORS.text,
-				Font = Enum.Font.GothamBold,
-				TextSize = 13,
-				AutoButtonColor = false,
-				LayoutOrder = order,
-			}, pad)
-			newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, button)
-			newInstance("UIStroke", { Color = COLORS.accent, Transparency = 0.45, Thickness = 2 }, button)
-			addPress(button)
-			connect(button.MouseButton1Click, callback)
-			table.insert(lit, { button = button, isOn = isOn })
-		end
-
-		addPadButton(1, "LOCK", function()
-			Bot.setLock(not Bot.lockOn)
-		end, function()
-			return Bot.lockOn
-		end)
-		addPadButton(2, "NEXT", function()
-			Bot.cycleLock()
-		end)
-		addPadButton(3, "BOT", function()
-			Settings.botEnabled = not Settings.botEnabled
-			Bot.refreshSetting("botEnabled")
-		end, function()
-			return Settings.botEnabled
-		end)
-		addPadButton(4, "COMBO", function()
-			Bot.playSelected()
-		end, function()
-			return Bot.comboRun ~= nil
-		end)
-		addPadButton(5, "STOP", function()
-			Bot.stopAll()
-		end)
-
-		connect(runService.Heartbeat, function()
-			pad.Visible = Settings.padVisible
-			for _, entry in ipairs(lit) do
-				local on = entry.isOn and entry.isOn() or false
-				entry.button.BackgroundColor3 = on and COLORS.accent or COLORS.card
-				entry.button.TextColor3 = on and COLORS.ink or COLORS.text
-			end
-
-			local text = Bot.lessonText()
-			status.Visible = text ~= ""
-			status.Text = text
-		end)
-	end
-
 	connect(userInputService.InputBegan, function(input, processed)
 		if not processed and input.KeyCode == TOGGLE_KEY then
 			setWindowOpen(not windowOpen)
@@ -8676,7 +8594,6 @@ function Zenny.init()
 		updateThreats()
 		updateDashes()
 		updateEvasive()
-		updatePreBlock()
 		Bot.update()
 		updateBlockController()
 		updateCounterBait()
