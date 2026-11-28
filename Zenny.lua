@@ -237,6 +237,8 @@ local learned = shared.ZennyLearned or { barrage = {}, shove = {}, uppercut = {}
 shared.ZennyLearned = learned
 learned.back = learned.back or {}
 learned.front = learned.front or {}
+learned.left = learned.left or {}
+learned.right = learned.right or {}
 learned.m1 = learned.m1 or {}
 -- Measured dash speeds per dash kind survive re-executes.
 local dashSpeeds = shared.ZennySpeeds or {}
@@ -844,6 +846,7 @@ end
 ---@param reason string?
 ---@return boolean
 local function sendM1(method, reason)
+	Zenny.lastM1At = os.clock()
 	local tag = string.format("%s (%s)", method, reason or "?")
 
 	if method == "Remote+Mobile" or method == "Remote" then
@@ -1144,7 +1147,7 @@ local function isBlocking(character)
 	end
 
 	for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-		if track.Name:lower():find("block", 1, true) then
+		if track.Name:lower():find("block", 1, true) and track.WeightCurrent > 0.1 then
 			return true
 		end
 	end
@@ -1561,8 +1564,10 @@ function Zenny.onDashEnded(entry, silent)
 		return
 	end
 
-	startLock(entry.root, true)
-	updateLock(myRoot, true)
+	if Settings.catchFace then
+		startLock(entry.root, true)
+		updateLock(myRoot, true)
+	end
 	clickM1("front dash end")
 end
 
@@ -1684,10 +1689,107 @@ local function onDashTrack(ctx)
 
 		if autoM1 and myRoot and flat <= reach + (entry.armed and 2 or 0) and not (Settings.counterBait and isCountering(ctx.character)) then
 			entry.fired = true
-			updateLock(myRoot, true)
+			if Settings.catchFace then
+				updateLock(myRoot, true)
+			end
 			clickM1(string.format("%s dash d=%d (instant)", kind, flat))
 			Zenny.timeLog(string.format("%s M1 sent instantly, d=%.1f", entry.bdc and "BDC" or kind, flat))
 		end
+	end
+end
+
+-- Position samples per enemy root, used to see a back dash by movement alone.
+Zenny.motion = setmetatable({}, { __mode = "k" })
+
+---A backdash cancel can cut the back dash animation, leaving only the move playing.
+---So also watch enemies that just swung: a fast move backwards right after counts as the cancel.
+function Zenny.watchBackMotion()
+	if not Settings.bdcCatch then
+		return
+	end
+
+	local _, myRoot = getMe()
+	if not myRoot then
+		return
+	end
+
+	local now = os.clock()
+	for root, swing in pairs(Bot.swings) do
+		local window = math.min(swing.length, 3) + Settings.bdcWindow
+		if not root.Parent or now - swing.at > window then
+			continue
+		end
+
+		-- Sample their position, keeping about a fifth of a second.
+		local history = Zenny.motion[root]
+		if not history then
+			history = {}
+			Zenny.motion[root] = history
+		end
+
+		table.insert(history, { t = now, position = root.Position })
+		while #history > 2 and now - history[1].t > 0.2 do
+			table.remove(history, 1)
+		end
+
+		if swing.motionDone or #history < 2 then
+			continue
+		end
+
+		local oldest = history[1]
+		local dt = now - oldest.t
+		if dt < 0.05 then
+			continue
+		end
+
+		local velocity = (root.Position - oldest.position) / dt
+		local reported = root.AssemblyLinearVelocity
+		if reported.Magnitude > velocity.Magnitude then
+			velocity = reported
+		end
+
+		local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+		local look = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+		local minimum = math.max((dashSpeeds.BACK or 60) * 0.55, 28)
+		if flatVelocity.Magnitude < minimum or look.Magnitude < 0.1 then
+			continue
+		end
+
+		-- A back dash goes against the way they face; knockback from our own hits does not count.
+		local character = root.Parent
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local backwards = flatVelocity.Unit:Dot(look.Unit) <= -0.6
+		local hurt = humanoid and now - (enemyHurtAt[humanoid] or 0) < 0.5
+		if not backwards or hurt or not humanoid or humanoid.Health <= 0 or character:FindFirstChild("Ragdoll") then
+			continue
+		end
+
+		-- A real back dash track for this enemy already covers it.
+		local covered = false
+		for _, entry in pairs(dashes) do
+			if entry.root == root and entry.kind == "BACK" and now - entry.startedAt < 0.8 then
+				covered = true
+				break
+			end
+		end
+
+		swing.motionDone = true
+		if covered then
+			continue
+		end
+
+		local offset = myRoot.Position - root.Position
+		onDashTrack({
+			character = character,
+			root = root,
+			humanoid = humanoid,
+			track = { IsPlaying = true, Length = 0.45, Speed = 1, Name = "BDC motion" },
+			kind = "BACK",
+			offset = offset,
+			distance = offset.Magnitude,
+			t0 = 0,
+			seenAt = now,
+		})
 	end
 end
 
@@ -1900,7 +2002,9 @@ function Zenny.updateDashes()
 		local inReach = flatDistance <= reach or predictedDistance <= reach or (interceptTime ~= nil and interceptTime <= math.max(lookahead, 0))
 		if autoM1 and not entry.fired and not entry.countering and timeOk and inReach then
 			entry.fired = true
-			updateLock(myRoot, true)
+			if Settings.catchFace then
+				updateLock(myRoot, true)
+			end
 			clickM1(string.format("%s dash d=%d", entry.kind, flatDistance))
 			Zenny.timeLog(string.format("%s M1 sent %.2fs into the dash, d=%.1f", entry.bdc and "BDC" or entry.kind, elapsed, flatDistance))
 		end
@@ -1983,53 +2087,116 @@ function Zenny.punishRemaining(track, entry, elapsed)
 	return math.max(length - position, 0) / track.Speed
 end
 
+---Check whether a "move" from this enemy is really the reaction to our own M1.
+---@param entry table
+---@return string?
+function Zenny.punishBlocker(entry)
+	local now = os.clock()
+	local ownM1 = math.max(Bot.selfLastM1 or 0, Zenny.lastM1At or 0)
+	if now - ownM1 < 0.6 then
+		return "our own M1"
+	end
+
+	local character = entry.root.Parent
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		local hurtAt = enemyHurtAt[humanoid] or 0
+		if now - hurtAt < 0.6 or hurtAt > entry.startedAt then
+			return "enemy hit"
+		end
+	end
+
+	return nil
+end
+
 ---Check whether a punish M1 may go out against this enemy right now.
 ---@param entry table
----@return boolean
+---@return boolean, string?
 function Zenny.canPunish(entry)
-	if entry.hitUs or not entry.root.Parent then
-		return false
+	if entry.hitUs then
+		return false, "we were hit"
+	end
+
+	local blocker = Zenny.punishBlocker(entry)
+	if blocker then
+		return false, blocker
+	end
+
+	if not entry.root.Parent then
+		return false, "enemy gone"
 	end
 
 	local _, myRoot = getMe()
 	local character = entry.root.Parent
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not myRoot or not humanoid or humanoid.Health <= 0 then
-		return false
+		return false, "no target"
 	end
 
 	local flat = ((entry.root.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
 	if flat > Settings.punishRange then
-		return false
+		return false, string.format("out of range %.0f", flat)
 	end
 
 	-- An M1 into a counter or a block is wasted.
-	return not isCountering(character) and not isBlocking(character)
+	if isCountering(character) then
+		return false, "countering"
+	end
+
+	if isBlocking(character) then
+		return false, "blocking"
+	end
+
+	return true
 end
 
----Face the enemy and send the punish M1.
+---Face the enemy and send the punish M1. A temporary no keeps retrying for a moment.
 ---@param entry table
 ---@param why string
 local function firePunish(entry, why)
-	entry.punishFired = true
-
 	local now = os.clock()
-	if now < punishLockedUntil or not Zenny.canPunish(entry) then
-		log(string.format("punish skipped (%s)", why))
+	entry.punishUntil = entry.punishUntil or (now + 0.3)
+
+	local ok, reason = Zenny.canPunish(entry)
+	if now < punishLockedUntil then
+		ok, reason = false, "cooldown"
+	end
+
+	if not ok then
+		-- Retry on the next frames while the window is open.
+		if now < entry.punishUntil and reason ~= "we were hit" and reason ~= "enemy gone" and reason ~= "enemy hit" and reason ~= "our own M1" then
+			entry.punishFired = false
+			entry.punishRetry = reason
+			return
+		end
+
+		entry.punishFired = true
+		log(string.format("punish skipped (%s: %s)", why, reason or "?"))
+		Zenny.timeLog(string.format("punish skipped: %s", reason or "?"))
 		return
 	end
 
+	entry.punishFired = true
 	local _, myRoot = getMe()
 	punishLockedUntil = now + 0.2
-	startLock(entry.root, true)
-	updateLock(myRoot, true)
+	if Settings.catchFace then
+		startLock(entry.root, true)
+		updateLock(myRoot, true)
+	end
 	clickM1(string.format("punish %s (%s)", entry.punish, why))
+	Zenny.timeLog(string.format("punish M1 sent (%s)", why))
 end
 
 ---Mark a move so an M1 goes out when it ends.
 ---@param entry table
 ---@param kind string
 local function armPunish(entry, kind)
+	local blocker = Zenny.punishBlocker(entry)
+	if blocker then
+		Zenny.timeLog(string.format("punish not armed (%s)", blocker))
+		return
+	end
+
 	if not Zenny.roll(Settings.punishRate) then
 		log("punish skipped: rate roll")
 		return
@@ -2037,7 +2204,9 @@ local function armPunish(entry, kind)
 
 	entry.punish = kind
 	entry.punishFired = false
+	entry.punishUntil = nil
 	entry.punishSlop = Zenny.slop(Settings.punishRate, 0.1)
+	Zenny.timeLog(string.format("punish armed (%s)", kind))
 end
 
 ---Register an enemy attack animation and start any move-specific reaction.
@@ -2141,8 +2310,10 @@ function Zenny.onThreatTrack(ctx)
 		task.delay(Settings.shoveDelay + Zenny.slop(Settings.shoveRate, 0.1), function()
 			local _, myRoot = getMe()
 			if myRoot and targetRoot.Parent then
-				startLock(targetRoot, true)
-				updateLock(myRoot, true)
+				if Settings.catchFace then
+					startLock(targetRoot, true)
+					updateLock(myRoot, true)
+				end
 				clickM1("shove")
 			end
 		end)
@@ -2242,6 +2413,7 @@ function Zenny.updateThreats()
 
 			-- Late fallback for swings whose end could not be predicted.
 			if entry.punish and not entry.punishFired then
+				entry.punishUntil = 0
 				firePunish(entry, "move ended")
 			end
 
@@ -2511,7 +2683,21 @@ local function onOwnTrack(track, fromEvent)
 		return
 	end
 
-	local ownDash = id and (DASH_TYPES[id] or (learned.back[id] and "BACK") or (learned.front[id] and "FRONT"))
+	-- Our own dash teaches the dash animation ids, so enemies' dashes are recognised.
+	local expected = Bot.expectDash
+	if expected and fromEvent and id and os.clock() - expected.at < 0.6 then
+		local known = DASH_TYPES[id] or learned.back[id] or learned.front[id] or learned.left[id] or learned.right[id]
+		local priority = track.Priority
+		if not known and not learned.m1[id] and not track.Looped and track.Length > 0.1 and track.Length < 1.5 and priority ~= Enum.AnimationPriority.Core and priority ~= Enum.AnimationPriority.Idle then
+			local bucket = ({ FRONT = learned.front, BACK = learned.back, LEFT = learned.left, RIGHT = learned.right })[expected.kind]
+			bucket[id] = true
+			Bot.expectDash = nil
+			log(string.format("auto learned %s dash = %s (%s)", expected.kind, id, track.Name))
+			Zenny.timeLog(string.format("learned %s dash id %s", expected.kind, id))
+		end
+	end
+
+	local ownDash = id and (DASH_TYPES[id] or (learned.back[id] and "BACK") or (learned.front[id] and "FRONT") or (learned.left[id] and "LEFT") or (learned.right[id] and "RIGHT"))
 	if ownDash then
 		Bot.onOwnDash(ownDash, track)
 	end
@@ -2571,6 +2757,14 @@ function Zenny.classify(track, id)
 
 		if learned.front[id] then
 			return "FRONT"
+		end
+
+		if learned.left[id] then
+			return "LEFT"
+		end
+
+		if learned.right[id] then
+			return "RIGHT"
 		end
 
 		if UPPERCUT_IDS[id] or learned.uppercut[id] then
@@ -2880,11 +3074,15 @@ function Zenny.updateCounterBait()
 			counterSeen[character] = nil
 
 			if Settings.counterPunish then
-				startLock(root, true)
+				if Settings.catchFace then
+					startLock(root, true)
+				end
 				task.delay(0.08, function()
 					local _, currentRoot = getMe()
 					if currentRoot and root.Parent then
-						updateLock(currentRoot, true)
+						if Settings.catchFace then
+							updateLock(currentRoot, true)
+						end
 						clickM1("counter punish")
 					end
 				end)
@@ -3456,6 +3654,9 @@ function Bot.onRemote(remote, ...)
 	end
 
 	if args.Dash and args.Goal == "KeyPress" then
+		local dashKinds = { [Enum.KeyCode.W] = "FRONT", [Enum.KeyCode.S] = "BACK", [Enum.KeyCode.A] = "LEFT", [Enum.KeyCode.D] = "RIGHT" }
+		local kind = dashKinds[args.Dash]
+		Bot.expectDash = kind and { kind = kind, at = os.clock() } or nil
 		Bot.countOwnDash(args.Dash)
 		Bot.assistFire(args.Dash)
 	end
@@ -3471,18 +3672,55 @@ function Bot.onRemote(remote, ...)
 	table.insert(recording.events, { t = now - recording.start, args = Bot.copy(args) })
 end
 
+---Decide whether a call the game itself made should be dropped.
+---Touching the screen makes the game release or re-press block, which flickers
+---auto block, so those are swallowed while auto block is holding it.
+---@param remote Instance
+---@return boolean
+function Bot.filterRemote(remote, ...)
+	if remote.Name ~= "Communicate" then
+		return false
+	end
+
+	local args = ...
+	if type(args) ~= "table" or args.Key ~= BLOCK_KEY then
+		return false
+	end
+
+	if args.Goal ~= "KeyRelease" and args.Goal ~= "KeyPress" then
+		return false
+	end
+
+	return blockDown and (os.clock() < blockUntil or heldBlocks > 0)
+end
+
 ---Hook FireServer once so we can see the game's own input remote calls.
 function Bot.installHook()
-	shared.ZennyRecord = Bot.onRemote
+	-- An older hook from a previous execute reads ZennyRecord; silence it so calls are not counted twice.
+	shared.ZennyRecord = nil
+	shared.ZennyRecord2 = Bot.onRemote
+	shared.ZennyFilter = Bot.filterRemote
 
-	if shared.ZennyHooked or not (hookmetamethod and getnamecallmethod and newcclosure) then
+	if shared.ZennyHooked2 or not (hookmetamethod and getnamecallmethod and newcclosure) then
 		return
 	end
 
 	local old
 	old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
 		local method = getnamecallmethod()
-		local record = shared.ZennyRecord
+		local record = shared.ZennyRecord2
+		local filter = shared.ZennyFilter
+		if filter and method == "FireServer" and not checkcaller() then
+			local ok, drop = pcall(filter, self, ...)
+			if ok and drop then
+				return
+			end
+
+			if setnamecallmethod then
+				setnamecallmethod(method)
+			end
+		end
+
 		if record and method == "FireServer" and not checkcaller() then
 			pcall(record, self, ...)
 			if setnamecallmethod then
@@ -3492,12 +3730,12 @@ function Bot.installHook()
 
 		return old(self, ...)
 	end))
-	shared.ZennyHooked = true
+	shared.ZennyHooked2 = true
 end
 
 ---Start recording the next inputs the player sends into the selected combo slot.
 function Bot.startRecording()
-	if not shared.ZennyHooked then
+	if not shared.ZennyHooked2 then
 		log("combo: remote hook missing, cannot record")
 		return
 	end
@@ -8308,6 +8546,7 @@ function Zenny.buildGui()
 	local block = addSection(combat, "Auto Block")
 	addSwitch(block, "Auto Block", "Hold F when an attack starts", "autoBlock")
 	addKeybind(block, "Toggle Key", "Backspace clears it", "keyAutoBlock")
+	addSwitch(block, "Lock Target", "Turn at the attacker while blocking, off leaves your aim alone", "blockFace")
 	addSlider(block, "Auto Block Rate", "100% blocks everything on time, lower misses more", "blockRate", 0, 100, 5, "%")
 	addAction(block, "Whitelist", "Skip friends and chosen players", "Open", function()
 		selectTab("Whitelist")
@@ -8852,6 +9091,7 @@ function Zenny.buildGui()
 	local side = addSection(dashPage, "Side Dash")
 	addSwitch(side, "Auto M1", "M1 on a side dash", "catchEnabled")
 	addKeybind(side, "Toggle Key", "Backspace clears it", "keySideDashM1")
+	addSwitch(side, "Lock Target", "Turn at them for catch, punish and shove M1s, off leaves your aim alone", "catchFace")
 	addSlider(side, "Auto M1 Catch Rate", "100% catches every side dash on time, lower misses more", "catchRate", 0, 100, 5, "%")
 	addSwitch(side, "Predict And Block", "Block side dashes that will reach you", "dashPredict")
 	addSwitch(side, "Visualizer", "Rings and timing line", "catchVisual")
@@ -9367,6 +9607,7 @@ function Zenny.init()
 		Zenny.scanOwn()
 		Zenny.scanEnemies()
 		Zenny.updateThreats()
+		Zenny.watchBackMotion()
 		Zenny.updateDashes()
 		Zenny.updateEvasive()
 		Bot.update()
@@ -9433,6 +9674,8 @@ function Zenny.detach()
 	end
 
 	shared.ZennyRecord = nil
+	shared.ZennyRecord2 = nil
+	shared.ZennyFilter = nil
 	pcall(function()
 		runService:UnbindFromRenderStep("ZennyLock")
 	end)
