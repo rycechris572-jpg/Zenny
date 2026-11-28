@@ -980,11 +980,13 @@ function Zenny.updateBlockController()
 	end
 
 	blockDown = want
+	Zenny.blockPressedAt = now
 	remote:FireServer({ Goal = want and "KeyPress" or "KeyRelease", Key = BLOCK_KEY })
 	if want then
 		log("block down")
 	end
 end
+
 
 ---Check the game's cooldown display for a move or dash.
 ---@param name string
@@ -1153,6 +1155,38 @@ local function isBlocking(character)
 	end
 
 	return false
+end
+
+---While block should be held, make sure the game still has it held.
+---The game can drop block on its own when the screen is touched, so press it again.
+function Zenny.resyncBlock()
+	if not blockDown then
+		return
+	end
+
+	local now = os.clock()
+	local character = localPlayer.Character
+	if not character then
+		return
+	end
+
+	local holding = isBlocking(character)
+	if holding then
+		-- The block signal works for us, so a missing one later means it was dropped.
+		Zenny.blockSignal = true
+		return
+	end
+
+	if not Zenny.blockSignal or now - (Zenny.blockPressedAt or 0) < 0.2 then
+		return
+	end
+
+	local remote = getRemote()
+	if remote then
+		Zenny.blockPressedAt = now
+		remote:FireServer({ Goal = "KeyPress", Key = BLOCK_KEY })
+		log("block resync: pressed again")
+	end
 end
 
 ---Remove the orientation constraint used by the lock.
@@ -1793,6 +1827,109 @@ function Zenny.watchBackMotion()
 	end
 end
 
+-- Front dashes seen by movement, so one is only reported once.
+Zenny.frontSeen = setmetatable({}, { __mode = "k" })
+Zenny.frontMotion = setmetatable({}, { __mode = "k" })
+
+---A front dash is spotted by movement when its animation id is not known:
+---an enemy suddenly moving fast straight at us the way they face.
+function Zenny.watchFrontMotion()
+	if not (Settings.autoBlock and Settings.frontBlock) then
+		return
+	end
+
+	local myCharacter, myRoot = getMe()
+	if not myRoot then
+		return
+	end
+
+	local now = os.clock()
+	local container = workspace:FindFirstChild("Live") or workspace
+	for _, character in ipairs(container:GetChildren()) do
+		if character == myCharacter or not character:IsA("Model") then
+			continue
+		end
+
+		local root = character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if not (root and humanoid and humanoid.Health > 0) then
+			continue
+		end
+
+		local offset = myRoot.Position - root.Position
+		local flatOffset = Vector3.new(offset.X, 0, offset.Z)
+		if flatOffset.Magnitude > Settings.frontRange * 1.3 or flatOffset.Magnitude < 3 then
+			Zenny.frontMotion[root] = nil
+			continue
+		end
+
+		local history = Zenny.frontMotion[root]
+		if not history then
+			history = {}
+			Zenny.frontMotion[root] = history
+		end
+
+		table.insert(history, { t = now, position = root.Position })
+		while #history > 2 and now - history[1].t > 0.2 do
+			table.remove(history, 1)
+		end
+
+		local oldest = history[1]
+		local dt = now - oldest.t
+		if dt < 0.05 or now - (Zenny.frontSeen[root] or 0) < 1.2 then
+			continue
+		end
+
+		local velocity = (root.Position - oldest.position) / dt
+		local reported = root.AssemblyLinearVelocity
+		if reported.Magnitude > velocity.Magnitude then
+			velocity = reported
+		end
+
+		local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+		local look = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+		local minimum = math.max((dashSpeeds.FRONT or 70) * 0.6, 42)
+		if flatVelocity.Magnitude < minimum or look.Magnitude < 0.1 then
+			continue
+		end
+
+		-- Fast, the way they face and toward us; knockback and ragdolls do not qualify.
+		local forward = flatVelocity.Unit:Dot(look.Unit) >= 0.7
+		local toward = flatVelocity.Unit:Dot(flatOffset.Unit) >= 0.8
+		local hurt = now - (enemyHurtAt[humanoid] or 0) < 0.5
+		if not forward or not toward or hurt or isRagdolled(character, humanoid) or isIgnored(character) then
+			continue
+		end
+
+		-- A real front dash track for this enemy already covers it.
+		local covered = false
+		for _, entry in pairs(dashes) do
+			if entry.root == root and entry.kind == "FRONT" and now - entry.startedAt < 1 then
+				covered = true
+				break
+			end
+		end
+
+		Zenny.frontSeen[root] = now
+		if covered then
+			continue
+		end
+
+		Zenny.timeLog(string.format("front dash seen by movement, d=%d", flatOffset.Magnitude))
+		onDashTrack({
+			character = character,
+			root = root,
+			humanoid = humanoid,
+			track = { IsPlaying = true, Length = 0.5, Speed = 1, Name = "Front motion" },
+			kind = "FRONT",
+			offset = offset,
+			distance = offset.Magnitude,
+			t0 = 0,
+			seenAt = now,
+		})
+	end
+end
+
 ---Run the dash timing, visuals and auto M1 every frame.
 function Zenny.updateDashes()
 	local _, myRoot = getMe()
@@ -2079,12 +2216,18 @@ end
 ---@return number?
 function Zenny.punishRemaining(track, entry, elapsed)
 	local length = entry.length or 0
-	if track.Looped or length <= 0 or track.Speed <= 0.01 then
+	if track.Looped or length <= 0 then
 		return nil
 	end
 
+	-- Real time since the swing began; a blocked swing can freeze its animation, so never wait on that alone.
+	local byClock = math.max(length - elapsed, 0)
+	if track.Speed <= 0.01 then
+		return byClock
+	end
+
 	local position = track.IsPlaying and track.TimePosition or elapsed
-	return math.max(length - position, 0) / track.Speed
+	return math.min(math.max(length - position, 0) / track.Speed, byClock)
 end
 
 ---Check whether a "move" from this enemy is really the reaction to our own M1.
@@ -2155,6 +2298,14 @@ end
 ---@param why string
 local function firePunish(entry, why)
 	local now = os.clock()
+
+	-- A punish for a swing that ended a while ago would land on their next move instead.
+	if now - entry.startedAt + (entry.t0 or 0) > (entry.length or 0.6) + 0.4 then
+		entry.punishFired = true
+		Zenny.timeLog("punish skipped: too late")
+		return
+	end
+
 	entry.punishUntil = entry.punishUntil or (now + 0.3)
 
 	local ok, reason = Zenny.canPunish(entry)
@@ -9608,10 +9759,12 @@ function Zenny.init()
 		Zenny.scanEnemies()
 		Zenny.updateThreats()
 		Zenny.watchBackMotion()
+		Zenny.watchFrontMotion()
 		Zenny.updateDashes()
 		Zenny.updateEvasive()
 		Bot.update()
 		Zenny.updateBlockController()
+		Zenny.resyncBlock()
 		Zenny.updateCounterBait()
 		Zenny.updateLockFrame()
 		Zenny.updateEsp()
