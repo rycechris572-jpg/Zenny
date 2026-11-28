@@ -74,7 +74,22 @@ local Bot = {
 		combo = Enum.KeyCode.G,
 	},
 	slots = { "Combo 1", "Combo 2", "Combo 3", "Combo 4" },
-	allSlots = { "Combo 1", "Combo 2", "Combo 3", "Combo 4", "Punish", "Poke" },
+	allSlots = { "Combo 1", "Combo 2", "Combo 3", "Combo 4", "Punish", "Poke", "Ragdoll", "Guard Break", "Finisher" },
+	ragdolled = false,
+	brainAt = 0,
+	selfLastM1 = nil,
+	selfOpponent = nil,
+	selfOpponentAt = 0,
+	hookUntil = 0,
+	faded = true,
+	rollAt = 0,
+	longArmOk = false,
+	brainWatching = 0,
+	brainResult = "none yet",
+	blended = nil,
+	blendedAt = 0,
+	brainWatched = setmetatable({}, { __mode = "k" }),
+	resetAt = 0,
 	lesson = nil,
 	lessonRoot = nil,
 	lessonResult = "none yet",
@@ -132,11 +147,38 @@ local Bot = {
 	},
 }
 
+---Make sure a style has the dash type counters.
+---@param style table
+function Bot.ensureTypes(style)
+	style.types = style.types or {}
+	for _, kind in ipairs({ "circle", "longarm", "hook", "back", "front" }) do
+		style.types[kind] = style.types[kind] or 0
+	end
+end
+
+---A fresh, empty strafe and dash style.
+---@return table
+function Bot.newStyle()
+	local style = { segments = {}, dist = {}, time = 0, pokes = 0, dashes = 0 }
+	Bot.ensureTypes(style)
+	return style
+end
+
 -- Recorded combos and learned strafe style survive re-executes.
 Bot.combos = shared.ZennyCombos or {}
 shared.ZennyCombos = Bot.combos
-Bot.style = shared.ZennyStyle or { segments = {}, dist = {}, time = 0, pokes = 0, dashes = 0 }
+Bot.style = shared.ZennyStyle or Bot.newStyle()
+Bot.ensureTypes(Bot.style)
 shared.ZennyStyle = Bot.style
+
+-- What the brain learned from other players survives re-executes too.
+Bot.profiles = shared.ZennyProfiles or {}
+shared.ZennyProfiles = Bot.profiles
+Bot.profileNames = { "None" }
+for name, profile in pairs(Bot.profiles) do
+	Bot.ensureTypes(profile.style)
+	table.insert(Bot.profileNames, name)
+end
 
 -- State.
 local localPlayer = playersService.LocalPlayer
@@ -317,7 +359,7 @@ local Settings = {
 	botBackStep = true,
 	botHook = true,
 	hookAngle = 35,
-	hookRange = 14,
+	hookRange = 12,
 	botUseLock = true,
 	lockCamera = true,
 	lockFaceChar = true,
@@ -340,6 +382,22 @@ local Settings = {
 	styleUse = true,
 	styleLearnSelf = false,
 	padVisible = true,
+	backStepRange = 11,
+	backStepDelay = 0.05,
+	botStringHits = 4,
+	brainOn = false,
+	brainRange = 60,
+	brainMode = "Mine",
+	brainMentor = "None",
+	longArm = true,
+	longArmChance = 10,
+	longArmBacklash = 35,
+	backlashName = "Backlash",
+	backlashMode = "Auto",
+	hookAway = true,
+	hookAwayAngle = 60,
+	hookWindow = 0.5,
+	hookFade = true,
 }
 
 ---Connect a signal and track it for detach.
@@ -2026,6 +2084,7 @@ end
 ---@return boolean
 local function needsScan()
 	return labRun ~= nil
+		or Bot.lesson ~= nil
 		or Settings.autoBlock
 		or Settings.autoEvasive
 		or Settings.adaptiveBlock
@@ -2533,10 +2592,9 @@ function Bot.save()
 		return false
 	end
 
-	local style = Bot.style
 	local data = {
 		combos = {},
-		style = { segments = style.segments, time = style.time, pokes = style.pokes, dashes = style.dashes, dist = {} },
+		style = Bot.packStyle(Bot.style),
 	}
 
 	for slot, combo in pairs(Bot.combos) do
@@ -2547,8 +2605,16 @@ function Bot.save()
 		data.combos[slot] = { events = events, length = combo.length }
 	end
 
-	for bucket, seconds in pairs(style.dist) do
-		data.style.dist[tostring(bucket)] = seconds
+	data.profiles = {}
+	for name, profile in pairs(Bot.profiles) do
+		data.profiles[name] = {
+			style = Bot.packStyle(profile.style),
+			clicks = Bot.tail(profile.clicks, 100),
+			fronts = Bot.tail(profile.fronts, 100),
+			sides = Bot.tail(profile.sides, 100),
+			backs = Bot.tail(profile.backs, 100),
+			holds = Bot.tail(profile.holds, 100),
+		}
 	end
 
 	return (pcall(function()
@@ -2584,17 +2650,20 @@ function Bot.load()
 		Bot.combos[slot] = { events = events, length = combo.length or 0 }
 	end
 
-	local saved = data.style
-	if saved then
-		local style = Bot.style
-		style.segments = saved.segments or {}
-		style.time = saved.time or 0
-		style.pokes = saved.pokes or 0
-		style.dashes = saved.dashes or 0
-		style.dist = {}
-		for bucket, seconds in pairs(saved.dist or {}) do
-			style.dist[tonumber(bucket)] = seconds
+	if data.style then
+		for key, value in pairs(Bot.unpackStyle(data.style)) do
+			Bot.style[key] = value
 		end
+	end
+
+	for name, saved in pairs(data.profiles or {}) do
+		local profile = Bot.newProfile(name)
+		profile.style = Bot.unpackStyle(saved.style or {})
+		profile.clicks = saved.clicks or {}
+		profile.fronts = saved.fronts or {}
+		profile.sides = saved.sides or {}
+		profile.backs = saved.backs or {}
+		profile.holds = saved.holds or {}
 	end
 
 	return true
@@ -2656,7 +2725,8 @@ function Bot.aimDash(myRoot, targetRoot, dashKey, hook)
 		-- Our right vector is (-look.Z, 0, look.X); the dash goes along it or its opposite.
 		local sideSign = dashKey == Enum.KeyCode.D and 1 or -1
 		local tangent = Vector3.new(-toward.Z, 0, toward.X) * sideSign
-		local angle = hook and math.rad(Settings.hookAngle) or 0
+		-- "away" bends outward for a hook; true bends inward for a circle dash.
+		local angle = hook == "away" and -math.rad(Settings.hookAwayAngle) or (hook and math.rad(Settings.hookAngle) or 0)
 		local desired = tangent * math.cos(angle) + toward * math.sin(angle)
 		local right = desired * sideSign
 		look = Vector3.new(right.Z, 0, -right.X)
@@ -2707,7 +2777,9 @@ function Bot.assistFire(dashKey)
 		return
 	end
 
-	Bot.aimDash(myRoot, targetRoot, dashKey, Settings.assistHook)
+	-- Close dashes circle around them; far ones are long arms and stay straight.
+	local flat = ((targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+	Bot.aimDash(myRoot, targetRoot, dashKey, Settings.assistHook and flat <= Settings.hookRange)
 end
 
 ---Handle one remote the game fires: dash assist, style counting and combo recording.
@@ -2722,12 +2794,15 @@ function Bot.onRemote(remote, ...)
 		return
 	end
 
+	Bot.measure(args)
+
+	if args.Goal == "LeftClick" then
+		Bot.selfLastM1 = os.clock()
+	end
+
 	if args.Dash and args.Goal == "KeyPress" then
-		Bot.measureDash(args.Dash)
+		Bot.countOwnDash(args.Dash)
 		Bot.assistFire(args.Dash)
-		if Settings.styleLearnSelf then
-			Bot.style.dashes += 1
-		end
 	end
 
 	local recording = Bot.recording
@@ -2827,14 +2902,21 @@ function Bot.retarget(args, targetRoot)
 	end
 end
 
+Bot.reasonSlots = { punish = "Punish", poke = "Poke", ragdoll = "Ragdoll", guard = "Guard Break" }
+
 ---Pick which combo slot to use next.
 ---@param reason string? "punish" or "poke" prefers the slot taught for it.
 ---@return string?
 function Bot.pickCombo(reason)
-	local special = reason == "punish" and "Punish" or (reason == "poke" and "Poke" or nil)
+	local special = Bot.reasonSlots[reason]
 	local taught = special and Bot.combos[special]
 	if taught and #taught.events > 0 then
 		return special
+	end
+
+	-- Never run a normal combo into a guard.
+	if reason == "guard" then
+		return nil
 	end
 
 	local selected = Bot.combos[Settings.comboSlot]
@@ -2923,7 +3005,8 @@ end
 ---@param opponent BasePart
 ---@param now number
 ---@param memo table
-function Bot.observe(subject, opponent, now, memo)
+---@param style table? The style to add to; ours by default.
+function Bot.observe(subject, opponent, now, memo, style)
 	local lastAt = memo.at
 	local lastPosition = memo.position
 	memo.at, memo.position = now, subject.Position
@@ -2947,7 +3030,7 @@ function Bot.observe(subject, opponent, now, memo)
 	local tangent = Vector3.new(-direction.Z, 0, direction.X)
 	local sideSpeed = velocity:Dot(tangent)
 	local inSpeed = velocity:Dot(direction)
-	local style = Bot.style
+	style = style or Bot.style
 
 	style.time += dt
 	local bucket = math.floor(distance + 0.5)
@@ -2984,7 +3067,7 @@ end
 ---@param myRoot BasePart
 ---@param now number
 function Bot.updateStudy(myRoot, now)
-	local learnSelf = Settings.styleLearnSelf or (Bot.lesson ~= nil and Bot.lesson.id == "strafe")
+	local learnSelf = Bot.learningSelf()
 	if not (learnSelf or Bot.studySubject) or now - Bot.studyAt < 0.1 then
 		return
 	end
@@ -2992,6 +3075,7 @@ function Bot.updateStudy(myRoot, now)
 
 	if learnSelf then
 		local opponent = Bot.lockTarget and Bot.lockTarget:FindFirstChild("HumanoidRootPart") or getNearestTarget(myRoot, 35)
+		Bot.selfOpponent, Bot.selfOpponentAt = opponent, now
 		if opponent then
 			Bot.observe(myRoot, opponent, now, Bot.selfMemo)
 		end
@@ -3030,7 +3114,7 @@ end
 ---Get the neutral spacing band, from the learned style when there is enough of it.
 ---@return number, number
 function Bot.getSpacing()
-	local style = Bot.style
+	local style = Bot.activeStyle()
 	if Settings.styleUse and style.time >= 15 then
 		local first = math.ceil(Settings.botReach) + 1
 		local total = 0
@@ -3063,7 +3147,7 @@ end
 ---How long to strafe one way, sampled from what was learned.
 ---@return number
 function Bot.strafeTime()
-	local segments = Bot.style.segments
+	local segments = Bot.activeStyle().segments
 	if Settings.styleUse and #segments >= 8 then
 		return segments[math.random(#segments)]
 	end
@@ -3074,7 +3158,7 @@ end
 ---Seconds between pokes.
 ---@return number
 function Bot.pokeInterval()
-	local style = Bot.style
+	local style = Bot.activeStyle()
 	if Settings.styleUse and style.time >= 20 and style.pokes >= 3 then
 		return math.clamp(style.time / style.pokes, 1, 8)
 	end
@@ -3085,7 +3169,7 @@ end
 ---Seconds between neutral side dashes.
 ---@return number
 function Bot.sideInterval()
-	local style = Bot.style
+	local style = Bot.activeStyle()
 	if Settings.styleUse and style.time >= 20 and style.dashes >= 3 then
 		return math.clamp(style.time / style.dashes, 1.2, 8)
 	end
@@ -3099,6 +3183,7 @@ function Bot.endPressure(now)
 	Bot.mode = "RESET"
 	Bot.modeUntil = now + 0.5
 	Bot.resetPending = true
+	Bot.resetAt = now + Settings.backStepDelay
 	Bot.hits = 0
 	Bot.nextPoke = now + Bot.pokeInterval() * (0.7 + math.random() * 0.6)
 end
@@ -3470,17 +3555,40 @@ function Bot.fight(now, myCharacter, myRoot, myHumanoid)
 	Bot.updateMove(myRoot, targetRoot, distance, retreat, attacking, now)
 	local pressure = Bot.mode == "PRESSURE"
 	local reach = Settings.botReach
+	Bot.rollLongArm(now)
 
-	-- Step back after a string.
-	if Bot.resetPending then
+	-- After a string: hook away from them or step straight back.
+	if Bot.resetPending and now >= Bot.resetAt then
 		Bot.resetPending = false
-		if Settings.botBackStep and not blocking and now >= Bot.nextDash and flatDistance < reach + 4 then
-			Bot.nextDash = now + 1.2
-			Bot.dash(myRoot, targetRoot, Enum.KeyCode.S, false)
+		if not blocking and now >= Bot.nextDash and flatDistance < Settings.backStepRange then
+			local hook = Settings.hookAway and (not Settings.botBackStep or math.random() < Bot.hookShare())
+			if hook then
+				Bot.nextDash = now + 0.7
+				Bot.hookUntil = now + 1.5
+				Bot.faded = false
+				Bot.dash(myRoot, targetRoot, math.random() < 0.5 and Enum.KeyCode.A or Enum.KeyCode.D, "away")
+				log("bot: hook away")
+			elseif Settings.botBackStep then
+				Bot.nextDash = now + 1.2
+				Bot.dash(myRoot, targetRoot, Enum.KeyCode.S, false)
+			end
 		end
 	end
 
-	-- Close the gap: front dash from far away, hook dash from mid range.
+	-- Fade out of their counter dash after a hook.
+	if Settings.hookFade and not Bot.faded and now < Bot.hookUntil and now >= Bot.nextDash then
+		for _, entry in pairs(dashes) do
+			if entry.root == targetRoot then
+				Bot.faded = true
+				Bot.nextDash = now + 1.2
+				Bot.dash(myRoot, targetRoot, Enum.KeyCode.S, false)
+				log("bot: fade out")
+				break
+			end
+		end
+	end
+
+	-- Close the gap: front dash from far away, circle or long arm side dashes closer in.
 	if pressure and not retreat and not blocking and not Bot.comboRun and Settings.botDashIn and now >= Bot.nextDash and flatDistance > reach + 3 then
 		if flatDistance > Settings.botDashRange and not isOnCooldown("forward") then
 			Bot.nextDash = now + 1.2
@@ -3491,15 +3599,13 @@ function Bot.fight(now, myCharacter, myRoot, myHumanoid)
 				Bot.dash(myRoot, targetRoot, Enum.KeyCode.W, false)
 			end
 			log(string.format("bot: front dash (%d studs)", flatDistance))
-		elseif Settings.botHook and flatDistance <= Settings.hookRange then
+		elseif Bot.approachSide(myRoot, targetRoot, flatDistance) then
 			Bot.nextDash = now + 1.2
-			Bot.dash(myRoot, targetRoot, math.random() < 0.5 and Enum.KeyCode.A or Enum.KeyCode.D, true)
-			log(string.format("bot: hook dash (%d studs)", flatDistance))
 		end
 	end
 
 	-- Neutral side dashes change the angle without committing.
-	if competitive and Bot.mode == "NEUTRAL" and Settings.neutralDash and not attacking and not blocking and now >= Bot.nextSide and now >= Bot.nextDash and flatDistance > reach + 1 then
+	if competitive and Bot.mode == "NEUTRAL" and Settings.neutralDash and not attacking and not blocking and now >= Bot.nextSide and now >= Bot.nextDash and flatDistance > reach + 1 and (flatDistance <= Settings.hookRange or (Settings.longArm and Bot.longArmOk)) then
 		Bot.nextSide = now + Bot.sideInterval()
 		Bot.nextDash = now + 1.2
 		Bot.dash(myRoot, targetRoot, math.random() < 0.5 and Enum.KeyCode.A or Enum.KeyCode.D, false)
@@ -3507,7 +3613,14 @@ function Bot.fight(now, myCharacter, myRoot, myHumanoid)
 
 	-- Recorded combo when they are close enough.
 	if pressure and not blocking and not retreat and not Bot.comboRun and Settings.comboUse and flatDistance <= Settings.comboRange and now >= Bot.comboReadyAt then
-		local slot = Bot.pickCombo(competitive and Bot.reason or nil)
+		local reason = competitive and Bot.reason or nil
+		if isBlocking(targetCharacter) then
+			reason = "guard"
+		elseif isRagdolled(targetCharacter, targetHumanoid) then
+			reason = "ragdoll"
+		end
+
+		local slot = Bot.pickCombo(reason)
 		if slot and Bot.playCombo(slot, targetRoot) then
 			Bot.comboReadyAt = now + Settings.comboCooldown
 			Bot.hits = 0
@@ -3535,10 +3648,15 @@ function Bot.fight(now, myCharacter, myRoot, myHumanoid)
 			Bot.hits += 1
 
 			-- A full string has endlag; rest, then start the next one.
-			if Bot.hits >= 4 then
+			if Bot.hits >= Settings.botStringHits then
 				Bot.hits = 0
 				Bot.nextM1 = now + Settings.botComboPause
-				if competitive then
+
+				-- A taught finisher ends the string; it ends the pressure phase when it is done.
+				local finisher = competitive and Bot.combos.Finisher
+				if finisher and #finisher.events > 0 and Bot.playCombo("Finisher", targetRoot) then
+					Bot.status = "Finisher"
+				elseif competitive then
 					Bot.endPressure(now)
 				end
 			else
@@ -3575,17 +3693,106 @@ end
 
 Bot.lessons = {
 	{ id = "strafe", name = "Strafe & Spacing", detail = "Fight around a target for 30s", duration = 30 },
-	{ id = "dash", name = "Dash Habits", detail = "Front and side dash at a target for 40s", duration = 40 },
+	{ id = "dash", name = "Dash Habits", detail = "Front, circle, long arm and hook for 40s", duration = 40 },
+	{ id = "circle", name = "Circle Dash", detail = "Side dash close to a target for 40s", duration = 40 },
+	{ id = "hookaway", name = "Hook Away", detail = "M1 then side dash away for 40s", duration = 40 },
 	{ id = "punish", name = "Punish Combo", detail = "Record what you do after they miss" },
 	{ id = "poke", name = "Poke Combo", detail = "Record the combo you start with" },
+	{ id = "m1", name = "M1 Rhythm", detail = "M1 a target for 30s: speed, string, reach", duration = 30 },
+	{ id = "back", name = "Back Step Habits", detail = "M1 then back dash for 40s", duration = 40 },
+	{ id = "block", name = "Block Habits", detail = "Block attacks for 40s", duration = 40 },
+	{ id = "escape", name = "Ragdoll Escape", detail = "Get ragdolled and dash out for 60s", duration = 60 },
+	{ id = "ragdoll", name = "Ragdoll Combo", detail = "Record your combo on a ragdolled target" },
+	{ id = "guard", name = "Guard Break", detail = "Record what you do into a blocker" },
+	{ id = "finisher", name = "Finisher", detail = "Record what you do to end a string" },
+	{ id = "combo1", name = "Combo 1", detail = "Record your first custom combo" },
+	{ id = "combo2", name = "Combo 2", detail = "Record your second custom combo" },
+	{ id = "combo3", name = "Combo 3", detail = "Record your third custom combo" },
+	{ id = "combo4", name = "Combo 4", detail = "Record your fourth custom combo" },
+	{ id = "punishtime", name = "Punish Timing", detail = "Punish enemy misses for 60s (needs Auto Block on)", duration = 60 },
 }
+
+---Whether our own movement should feed the strafe style right now.
+---@return boolean
+function Bot.learningSelf()
+	return Settings.styleLearnSelf or (Bot.lesson ~= nil and Bot.lesson.id == "strafe")
+end
+
+---Get the median of a list of numbers.
+---@param list number[]
+---@param fraction number? 0.5 for the median, 0.8 for the 80th percentile.
+---@return number
+function Bot.percentile(list, fraction)
+	local sorted = table.clone(list)
+	table.sort(sorted)
+	return sorted[math.clamp(math.ceil(#sorted * (fraction or 0.5)), 1, #sorted)]
+end
+
+---Flat distance from us to the lesson target, if there is one.
+---@return number?
+function Bot.lessonDistance()
+	local myRoot, targetRoot = Bot.myRoot, Bot.lessonRoot
+	if not (myRoot and targetRoot and targetRoot.Parent) then
+		return nil
+	end
+
+	return ((targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+end
+
+---Take a sample for the running lesson from one input the player sent.
+---@param args table
+function Bot.measure(args)
+	local lesson = Bot.lesson
+	if not lesson or lesson.slot then
+		return
+	end
+
+	local now = os.clock()
+	local id, goal = lesson.id, args.Goal
+
+	if goal == "LeftClick" then
+		lesson.lastClick = now
+	end
+
+	if (id == "dash" or id == "circle" or id == "hookaway") and args.Dash and goal == "KeyPress" then
+		Bot.measureDash(args.Dash)
+	elseif id == "m1" and goal == "LeftClick" then
+		local distance = Bot.lessonDistance()
+		table.insert(lesson.clicks, { t = now, distance = distance })
+	elseif id == "back" then
+		if goal == "LeftClick" then
+			lesson.lastClick = now
+		elseif args.Dash == Enum.KeyCode.S and goal == "KeyPress" then
+			local distance = Bot.lessonDistance()
+			if distance then
+				table.insert(lesson.backs, { distance = distance, since = lesson.lastClick and now - lesson.lastClick or nil })
+			end
+		end
+	elseif id == "block" and args.Key == BLOCK_KEY then
+		if goal == "KeyPress" then
+			lesson.pressedAt = now
+		elseif goal == "KeyRelease" and lesson.pressedAt then
+			table.insert(lesson.holds, now - lesson.pressedAt)
+			lesson.pressedAt = nil
+		end
+	elseif id == "punishtime" and (goal == "LeftClick" or (args.Dash == Enum.KeyCode.W and goal == "KeyPress")) then
+		local targetRoot = Bot.lessonRoot
+		local endedAt = targetRoot and lastMoveEnd[targetRoot]
+		if endedAt and endedAt ~= lesson.lastPunished and now - endedAt < 1.5 then
+			lesson.lastPunished = endedAt
+			table.insert(lesson.reactions, now - endedAt)
+		end
+	elseif id == "escape" and args.Dash and goal == "KeyPress" and Bot.ragdolled then
+		table.insert(lesson.escapes, { key = args.Dash, t = now })
+	end
+end
 
 ---Note where the player dashes relative to the target during the dash lesson.
 ---@param dashKey Enum.KeyCode
 function Bot.measureDash(dashKey)
 	local lesson = Bot.lesson
 	local myRoot, targetRoot = Bot.myRoot, Bot.lessonRoot
-	if not lesson or lesson.id ~= "dash" or not (myRoot and targetRoot and targetRoot.Parent) then
+	if not lesson or not (myRoot and targetRoot and targetRoot.Parent) then
 		return
 	end
 
@@ -3595,7 +3802,9 @@ function Bot.measureDash(dashKey)
 	end
 
 	if dashKey == Enum.KeyCode.W then
-		table.insert(lesson.front, offset.Magnitude)
+		if lesson.id == "dash" then
+			table.insert(lesson.front, offset.Magnitude)
+		end
 	elseif dashKey == Enum.KeyCode.A or dashKey == Enum.KeyCode.D then
 		local right = myRoot.CFrame.RightVector * Vector3.new(1, 0, 1)
 		if right.Magnitude < 0.1 then
@@ -3605,7 +3814,8 @@ function Bot.measureDash(dashKey)
 		-- Positive means the dash bends toward the target.
 		local direction = right.Unit * (dashKey == Enum.KeyCode.D and 1 or -1)
 		local inward = math.deg(math.asin(math.clamp(direction:Dot(offset.Unit), -1, 1)))
-		table.insert(lesson.sides, { angle = inward, distance = offset.Magnitude })
+		local since = lesson.lastClick and os.clock() - lesson.lastClick or nil
+		table.insert(lesson.sides, { angle = inward, distance = offset.Magnitude, hook = since ~= nil and since < Settings.hookWindow, since = since })
 	end
 end
 
@@ -3613,9 +3823,7 @@ end
 ---@param list number[]
 ---@return number
 function Bot.median(list)
-	local sorted = table.clone(list)
-	table.sort(sorted)
-	return sorted[math.ceil(#sorted / 2)]
+	return Bot.percentile(list, 0.5)
 end
 
 ---Push a setting change to its row in the window.
@@ -3651,10 +3859,26 @@ function Bot.startLesson(id)
 		baseTime = Bot.style.time,
 		front = {},
 		sides = {},
+		clicks = {},
+		backs = {},
+		holds = {},
+		escapes = {},
+		reactions = {},
 	}
 
-	if id == "punish" or id == "poke" then
-		lesson.slot = id == "punish" and "Punish" or "Poke"
+	local recordSlots = {
+		punish = "Punish",
+		poke = "Poke",
+		ragdoll = "Ragdoll",
+		guard = "Guard Break",
+		finisher = "Finisher",
+		combo1 = "Combo 1",
+		combo2 = "Combo 2",
+		combo3 = "Combo 3",
+		combo4 = "Combo 4",
+	}
+	if recordSlots[id] then
+		lesson.slot = recordSlots[id]
 		lesson.before = Bot.combos[lesson.slot]
 		Settings.comboSlot = lesson.slot
 		Bot.refreshSetting("comboSlot")
@@ -3697,6 +3921,265 @@ function Bot.stopAll()
 	end
 end
 
+Bot.finishers = {}
+
+---Apply a list of { key, value, format } setting changes and describe them.
+---@param changes table
+---@return string?
+function Bot.applyChanges(changes)
+	local parts = {}
+	for _, change in ipairs(changes) do
+		Settings[change[1]] = change[2]
+		Bot.refreshSetting(change[1])
+		table.insert(parts, string.format(change[3], change[2]))
+	end
+
+	return #parts > 0 and table.concat(parts, ", ") or nil
+end
+
+---Setting changes from M1 swing samples of { t, distance }.
+---@param clicks table
+---@return table
+function Bot.m1Changes(clicks)
+	local changes = {}
+	if #clicks < 4 then
+		return changes
+	end
+
+	-- A gap over 0.7s ends a string; shorter gaps are the swing rhythm.
+	local rhythm, lengths, rests, distances = {}, {}, {}, {}
+	local length = 1
+	for index = 2, #clicks do
+		local gap = clicks[index].t - clicks[index - 1].t
+		if gap < 0.7 then
+			table.insert(rhythm, gap)
+			length += 1
+		else
+			table.insert(lengths, length)
+			if gap < 3 then
+				table.insert(rests, gap)
+			end
+			length = 1
+		end
+	end
+	table.insert(lengths, length)
+
+	for _, click in ipairs(clicks) do
+		if click.distance then
+			table.insert(distances, click.distance)
+		end
+	end
+
+	if #rhythm >= 3 then
+		table.insert(changes, { "botM1Rate", math.clamp(math.floor(Bot.median(rhythm) * 100 + 0.5) / 100, 0.1, 0.5), "M1 every %.2fs" })
+	end
+
+	if #lengths >= 2 then
+		table.insert(changes, { "botStringHits", math.clamp(math.floor(Bot.median(lengths)), 1, 8), "%d-hit strings" })
+	end
+
+	if #rests >= 2 then
+		table.insert(changes, { "botComboPause", math.clamp(math.floor(Bot.median(rests) * 20 + 0.5) / 20, 0.2, 1.2), "%.2fs rest" })
+	end
+
+	if #distances >= 4 then
+		table.insert(changes, { "botReach", math.clamp(math.floor(Bot.percentile(distances, 0.8) * 2 + 1) / 2, 3, 12), "reach %g" })
+		table.insert(changes, { "botEngage", math.clamp(math.floor(Bot.median(distances) * 2 + 0.5) / 2, 2, 12), "spacing %g" })
+	end
+
+	return changes
+end
+
+---Setting changes from front dash distances and side dash samples of { angle, distance, hook, since }.
+---@param fronts number[]
+---@param sides table
+---@return table
+function Bot.dashChanges(fronts, sides)
+	local changes = {}
+	if #fronts >= 2 then
+		table.insert(changes, { "botDashRange", math.clamp(math.floor(Bot.median(fronts)), 10, 60), "front dash from %d studs" })
+	end
+
+	-- Hooks follow a hit, circles are close, anything farther is a long arm.
+	local circle, away, far = {}, {}, 0
+	for _, side in ipairs(sides) do
+		if side.hook then
+			table.insert(away, -side.angle)
+		elseif side.distance <= Settings.hookRange then
+			table.insert(circle, side.angle)
+		else
+			far += 1
+		end
+	end
+
+	if #circle >= 2 then
+		table.insert(changes, { "hookAngle", math.clamp(math.floor(Bot.median(circle) / 5 + 0.5) * 5, 0, 80), "circle bend %d°" })
+	end
+
+	if #away >= 2 then
+		table.insert(changes, { "hookAwayAngle", math.clamp(math.floor(Bot.median(away) / 5 + 0.5) * 5, 10, 90), "hook away %d°" })
+	end
+
+	local total = #circle + #away + far
+	if total >= 4 then
+		table.insert(changes, { "longArmChance", math.clamp(math.floor(far / total * 100 + 0.5), 0, 60), "long arm %d%%" })
+	end
+
+	return changes
+end
+
+---Setting changes from back dash samples of { distance, since }.
+---@param backs table
+---@return table
+function Bot.backChanges(backs)
+	local changes = {}
+	if #backs < 2 then
+		return changes
+	end
+
+	local distances, delays = {}, {}
+	for _, back in ipairs(backs) do
+		table.insert(distances, back.distance)
+		if back.since and back.since < 1.5 then
+			table.insert(delays, back.since)
+		end
+	end
+
+	table.insert(changes, { "backStepRange", math.clamp(math.floor(Bot.percentile(distances, 0.75) + 1), 4, 20), "back step inside %d studs" })
+	if #delays >= 2 then
+		table.insert(changes, { "backStepDelay", math.clamp(math.floor(Bot.median(delays) * 20 + 0.5) / 20, 0, 0.6), "%.2fs after the string" })
+	end
+
+	return changes
+end
+
+---Setting changes from block hold durations.
+---@param holds number[]
+---@return table
+function Bot.blockChanges(holds)
+	if #holds < 3 then
+		return {}
+	end
+
+	return { { "blockHold", math.clamp(math.floor(Bot.median(holds) * 20 + 0.5) / 20, 0.1, 1), "block hold %.2fs" } }
+end
+
+---@return string
+function Bot.finishers.strafe(lesson)
+	local low, high = Bot.getSpacing()
+	local seconds = Bot.style.time - lesson.baseTime
+	if seconds < 5 then
+		return "no movement seen: lock or stay near an enemy"
+	end
+
+	return string.format("learned %ds, %d strafes, spacing %d-%d", seconds, #Bot.style.segments, low, high)
+end
+
+---@return string
+function Bot.finishers.dash(lesson)
+	return Bot.applyChanges(Bot.dashChanges(lesson.front, lesson.sides)) or "not enough dashes: dash at a target at least twice"
+end
+
+---@return string
+function Bot.finishers.circle(lesson)
+	local angles, distances = {}, {}
+	for _, side in ipairs(lesson.sides) do
+		if not side.hook then
+			table.insert(angles, side.angle)
+			table.insert(distances, side.distance)
+		end
+	end
+
+	if #angles < 2 then
+		return "not enough circle dashes: side dash close to a target at least twice"
+	end
+
+	return Bot.applyChanges({
+		{ "hookAngle", math.clamp(math.floor(Bot.median(angles) / 5 + 0.5) * 5, 0, 80), "circle bend %d°" },
+		{ "hookRange", math.clamp(math.floor(Bot.percentile(distances, 0.9) + 1), 6, 30), "circle range %d studs" },
+	}) or ""
+end
+
+---@return string
+function Bot.finishers.hookaway(lesson)
+	local angles, delays = {}, {}
+	for _, side in ipairs(lesson.sides) do
+		if side.hook then
+			table.insert(angles, -side.angle)
+			table.insert(delays, side.since)
+		end
+	end
+
+	if #angles < 2 then
+		return "not enough hooks: M1 then side dash away at least twice"
+	end
+
+	local changes = { { "hookAwayAngle", math.clamp(math.floor(Bot.median(angles) / 5 + 0.5) * 5, 10, 90), "hook away %d°" } }
+	table.insert(changes, { "backStepDelay", math.clamp(math.floor(Bot.median(delays) * 20 + 0.5) / 20, 0, 0.6), "%.2fs after the hit" })
+	return Bot.applyChanges(changes) or ""
+end
+
+---@return string
+function Bot.finishers.m1(lesson)
+	return Bot.applyChanges(Bot.m1Changes(lesson.clicks)) or "not enough M1s: swing at a target at least four times"
+end
+
+---@return string
+function Bot.finishers.back(lesson)
+	return Bot.applyChanges(Bot.backChanges(lesson.backs)) or "not enough back dashes: M1 then back dash at least twice"
+end
+
+---@return string
+function Bot.finishers.block(lesson)
+	return Bot.applyChanges(Bot.blockChanges(lesson.holds)) or "not enough blocks: block at least three times"
+end
+
+---@return string
+function Bot.finishers.punishtime(lesson)
+	if #lesson.reactions < 3 then
+		return "not enough punishes: swing or dash right after an enemy misses, at least three times"
+	end
+
+	local window = math.clamp(math.floor((Bot.percentile(lesson.reactions, 0.8) + 0.1) * 20 + 0.5) / 20, 0.2, 1.2)
+	return Bot.applyChanges({ { "punishWindow", window, "punish window %.2fs" } })
+end
+
+---@return string
+function Bot.finishers.escape(lesson)
+	local escapes = lesson.escapes
+	if #escapes < 3 then
+		return "not enough dashes while ragdolled: get ragdolled and dash out"
+	end
+
+	local counts = { Back = 0, Left = 0, Right = 0 }
+	local gaps = {}
+	for index, escape in ipairs(escapes) do
+		local name = escape.key == Enum.KeyCode.S and "Back" or (escape.key == Enum.KeyCode.A and "Left" or (escape.key == Enum.KeyCode.D and "Right" or nil))
+		if name then
+			counts[name] += 1
+		end
+
+		local gap = index > 1 and escape.t - escapes[index - 1].t or nil
+		if gap and gap < 1 then
+			table.insert(gaps, gap)
+		end
+	end
+
+	local best = "Back"
+	for name, count in pairs(counts) do
+		if count > counts[best] then
+			best = name
+		end
+	end
+
+	local changes = { { "evasiveDirection", best, "escape dash %s" } }
+	if #gaps >= 2 then
+		table.insert(changes, { "evasiveRate", math.clamp(math.floor(Bot.median(gaps) * 100 + 0.5) / 100, 0.02, 0.2), "every %.2fs" })
+	end
+
+	return Bot.applyChanges(changes) or ""
+end
+
 ---Turn the samples of a finished timed lesson into settings.
 function Bot.finishLesson()
 	local lesson = Bot.lesson
@@ -3705,37 +4188,7 @@ function Bot.finishLesson()
 		return
 	end
 
-	local result
-	if lesson.id == "strafe" then
-		local low, high = Bot.getSpacing()
-		local seconds = Bot.style.time - lesson.baseTime
-		result = seconds < 5 and "no movement seen: lock or stay near an enemy"
-			or string.format("learned %ds, %d strafes, spacing %d-%d", seconds, #Bot.style.segments, low, high)
-	else
-		local parts = {}
-		if #lesson.front >= 2 then
-			Settings.botDashRange = math.clamp(math.floor(Bot.median(lesson.front)), 10, 60)
-			Bot.refreshSetting("botDashRange")
-			table.insert(parts, string.format("front dash from %d studs", Settings.botDashRange))
-		end
-
-		if #lesson.sides >= 2 then
-			local angles, distances = {}, {}
-			for _, side in ipairs(lesson.sides) do
-				table.insert(angles, side.angle)
-				table.insert(distances, side.distance)
-			end
-
-			Settings.hookAngle = math.clamp(math.floor(Bot.median(angles) / 5 + 0.5) * 5, 0, 80)
-			Settings.hookRange = math.clamp(math.floor(Bot.median(distances)), 6, 30)
-			Bot.refreshSetting("hookAngle")
-			Bot.refreshSetting("hookRange")
-			table.insert(parts, string.format("hook %d° up to %d studs", Settings.hookAngle, Settings.hookRange))
-		end
-
-		result = #parts > 0 and table.concat(parts, ", ") or "not enough dashes: dash at a target at least twice"
-	end
-
+	local result = Bot.finishers[lesson.id](lesson)
 	Bot.lessonResult = result
 	Bot.save()
 	log("lesson done: " .. result)
@@ -3759,7 +4212,7 @@ function Bot.updateLesson(now, myRoot)
 		return
 	end
 
-	if lesson.id == "dash" and myRoot then
+	if myRoot then
 		local lockRoot = Bot.lockOn and Bot.lockTarget and Bot.getParts(Bot.lockTarget)
 		Bot.lessonRoot = lockRoot or getNearestTarget(myRoot, 45)
 	end
@@ -3782,18 +4235,517 @@ function Bot.lessonText()
 	end
 
 	local left = math.max(math.ceil(lesson.endsAt - os.clock()), 0)
-	if lesson.id == "strafe" then
-		return string.format("%s: %ds left, %ds seen", lesson.info.name, left, Bot.style.time - lesson.baseTime)
+	local id = lesson.id
+	local progress
+	if id == "strafe" then
+		progress = string.format("%ds seen", Bot.style.time - lesson.baseTime)
+	elseif id == "dash" then
+		progress = string.format("%d front, %d side", #lesson.front, #lesson.sides)
+	elseif id == "circle" or id == "hookaway" then
+		progress = string.format("%d side dashes", #lesson.sides)
+	elseif id == "m1" then
+		progress = string.format("%d swings", #lesson.clicks)
+	elseif id == "back" then
+		progress = string.format("%d back dashes", #lesson.backs)
+	elseif id == "block" then
+		progress = string.format("%d blocks", #lesson.holds)
+	elseif id == "punishtime" then
+		progress = string.format("%d punishes", #lesson.reactions)
+	else
+		progress = string.format("%d escapes", #lesson.escapes)
 	end
 
-	return string.format("%s: %ds left, %d front, %d side", lesson.info.name, left, #lesson.front, #lesson.sides)
+	return string.format("%s: %ds left, %s", lesson.info.name, left, progress)
 end
+
+---Add a value to a list, dropping the oldest past a cap.
+---@param list table
+---@param value any
+---@param cap number
+function Bot.push(list, value, cap)
+	table.insert(list, value)
+	if #list > cap then
+		table.remove(list, 1)
+	end
+end
+
+---Copy the last few entries of a list.
+---@param list table
+---@param count number
+---@return table
+function Bot.tail(list, count)
+	local out = {}
+	for index = math.max(#list - count + 1, 1), #list do
+		table.insert(out, list[index])
+	end
+
+	return out
+end
+
+---Make styles safe for JSON.
+---@param style table
+---@return table
+function Bot.packStyle(style)
+	local dist = {}
+	for bucket, seconds in pairs(style.dist) do
+		dist[tostring(bucket)] = seconds
+	end
+
+	Bot.ensureTypes(style)
+	return { segments = style.segments, time = style.time, pokes = style.pokes, dashes = style.dashes, dist = dist, types = style.types }
+end
+
+---Read a saved style back.
+---@param saved table
+---@return table
+function Bot.unpackStyle(saved)
+	local style = { segments = saved.segments or {}, dist = {}, time = saved.time or 0, pokes = saved.pokes or 0, dashes = saved.dashes or 0, types = saved.types }
+	Bot.ensureTypes(style)
+	for bucket, seconds in pairs(saved.dist or {}) do
+		style.dist[tonumber(bucket)] = seconds
+	end
+
+	return style
+end
+
+---Get or create the brain's profile of a player.
+---@param name string
+---@return table
+function Bot.newProfile(name)
+	local profile = Bot.profiles[name]
+	if profile then
+		return profile
+	end
+
+	profile = {
+		name = name,
+		style = Bot.newStyle(),
+		clicks = {},
+		fronts = {},
+		sides = {},
+		backs = {},
+		holds = {},
+		memo = {},
+	}
+	Bot.profiles[name] = profile
+	table.insert(Bot.profileNames, name)
+	return profile
+end
+
+---Delete a profile.
+---@param name string
+function Bot.forgetProfile(name)
+	Bot.profiles[name] = nil
+	local index = table.find(Bot.profileNames, name)
+	if index and name ~= "None" then
+		table.remove(Bot.profileNames, index)
+	end
+
+	if Settings.brainMentor == name then
+		Settings.brainMentor = "None"
+		Bot.refreshSetting("brainMentor")
+	end
+end
+
+---Merge several styles into one so the bot can play like all of them.
+---@return table
+function Bot.blendStyle()
+	local now = os.clock()
+	if Bot.blended and now - Bot.blendedAt < 5 then
+		return Bot.blended
+	end
+
+	local merged = Bot.newStyle()
+	local function add(style)
+		if style.time < 15 then
+			return
+		end
+
+		for _, segment in ipairs(style.segments) do
+			table.insert(merged.segments, segment)
+		end
+		for bucket, seconds in pairs(style.dist) do
+			merged.dist[bucket] = (merged.dist[bucket] or 0) + seconds
+		end
+		merged.time += style.time
+		merged.pokes += style.pokes
+		merged.dashes += style.dashes
+		Bot.ensureTypes(style)
+		for kind, count in pairs(style.types) do
+			merged.types[kind] = (merged.types[kind] or 0) + count
+		end
+	end
+
+	add(Bot.style)
+	for _, profile in pairs(Bot.profiles) do
+		add(profile.style)
+	end
+
+	Bot.blended = merged.time >= 15 and merged or Bot.style
+	Bot.blendedAt = now
+	return Bot.blended
+end
+
+---The style the bot plays from: its own, a mentor's, or a blend.
+---@return table
+function Bot.activeStyle()
+	if Settings.brainMode == "Mentor" then
+		local profile = Bot.profiles[Settings.brainMentor]
+		if profile and profile.style.time >= 15 then
+			return profile.style
+		end
+	elseif Settings.brainMode == "Blend" then
+		return Bot.blendStyle()
+	end
+
+	return Bot.style
+end
+
+---Count one animation a watched player played: dashes and M1 swings.
+---@param profile table
+---@param track AnimationTrack
+function Bot.brainTrack(profile, track)
+	local root, opponentRoot = profile.root, profile.opponentRoot
+	if not Settings.brainOn or not (root and root.Parent and opponentRoot and opponentRoot.Parent) then
+		return
+	end
+
+	local offset = (opponentRoot.Position - root.Position) * Vector3.new(1, 0, 1)
+	local distance = offset.Magnitude
+	if distance < 1 or distance > 40 then
+		return
+	end
+
+	local id = getTrackId(track)
+	local kind = id and (DASH_TYPES[id] or (learned.back[id] and "BACK") or (learned.front[id] and "FRONT"))
+
+	if kind then
+		profile.style.dashes += 1
+		local startedAt = os.clock()
+		local since = profile.lastClickAt and startedAt - profile.lastClickAt or nil
+
+		if kind == "FRONT" then
+			Bot.countDash(profile.style, "FRONT", distance, since)
+			Bot.push(profile.fronts, distance, 100)
+		elseif kind == "BACK" then
+			Bot.countDash(profile.style, "BACK", distance, since)
+			Bot.push(profile.backs, { distance = distance, since = since }, 100)
+		else
+			-- The dash direction shows in their velocity a moment later.
+			local toward = offset.Unit
+			task.delay(0.12, function()
+				if not root.Parent then
+					return
+				end
+
+				local velocity = root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+				if velocity.Magnitude < 15 then
+					return
+				end
+
+				local inward = math.deg(math.asin(math.clamp(velocity.Unit:Dot(toward), -1, 1)))
+				Bot.countDash(profile.style, "SIDE", distance, since)
+				Bot.push(profile.sides, { angle = inward, distance = distance, hook = since ~= nil and since < Settings.hookWindow, since = since }, 100)
+			end)
+		end
+		return
+	end
+
+	-- With M1 ids learned in the Lab only those count; otherwise any short one-shot move.
+	local taught = next(learned.m1) ~= nil
+	if classify(track, id) == "ATTACK" and track.Length <= 0.8 and (not taught or (id and learned.m1[id])) then
+		profile.lastClickAt = os.clock()
+		Bot.push(profile.clicks, { t = profile.lastClickAt, distance = distance }, 150)
+	end
+end
+
+---Hook a watched player's animator and track how long they hold block.
+---@param character Model
+---@param profile table
+---@param opponentRoot BasePart
+---@param now number
+function Bot.brainWatch(character, profile, opponentRoot, now)
+	profile.root = character:FindFirstChild("HumanoidRootPart")
+	profile.opponentRoot = opponentRoot
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+	if animator and not Bot.brainWatched[animator] then
+		Bot.brainWatched[animator] = true
+		connect(animator.AnimationPlayed, function(track)
+			Bot.brainTrack(profile, track)
+		end)
+	end
+
+	local blocking = isBlocking(character)
+	if blocking and not profile.blockAt then
+		profile.blockAt = now
+	elseif not blocking and profile.blockAt then
+		local hold = now - profile.blockAt
+		profile.blockAt = nil
+		if hold >= 0.1 and hold <= 3 then
+			Bot.push(profile.holds, hold, 100)
+		end
+	end
+end
+
+---Watch the players fighting nearby and learn from each of them.
+---@param myRoot BasePart
+---@param now number
+function Bot.updateBrain(myRoot, now)
+	if not Settings.brainOn or now - Bot.brainAt < 0.1 then
+		return
+	end
+	Bot.brainAt = now
+
+	local fighters = {}
+	local container = workspace:FindFirstChild("Live") or workspace
+	for _, character in ipairs(container:GetChildren()) do
+		if character:IsA("Model") then
+			local root = Bot.getParts(character)
+			if root then
+				table.insert(fighters, { character = character, root = root })
+			end
+		end
+	end
+
+	local watching = 0
+	for _, fighter in ipairs(fighters) do
+		local player = playersService:GetPlayerFromCharacter(fighter.character)
+		if player and player ~= localPlayer and (fighter.root.Position - myRoot.Position).Magnitude <= Settings.brainRange then
+			-- They are fighting whoever is closest to them.
+			local opponent, closest = nil, 35
+			for _, other in ipairs(fighters) do
+				if other.character ~= fighter.character then
+					local distance = (other.root.Position - fighter.root.Position).Magnitude
+					if distance < closest then
+						opponent, closest = other, distance
+					end
+				end
+			end
+
+			if opponent and not fighter.character:FindFirstChild("Ragdoll") then
+				local profile = Bot.newProfile(player.Name)
+				watching += 1
+				Bot.observe(fighter.root, opponent.root, now, profile.memo, profile.style)
+				Bot.brainWatch(fighter.character, profile, opponent.root, now)
+			end
+		end
+	end
+
+	Bot.brainWatching = watching
+end
+
+---Copy a profile's numbers into the sliders.
+---@param profile table
+---@return string
+function Bot.adoptProfile(profile)
+	local changes = {}
+	for _, list in ipairs({
+		Bot.m1Changes(profile.clicks),
+		Bot.dashChanges(profile.fronts, profile.sides),
+		Bot.backChanges(profile.backs),
+		Bot.blockChanges(profile.holds),
+	}) do
+		for _, change in ipairs(list) do
+			table.insert(changes, change)
+		end
+	end
+
+	local text = Bot.applyChanges(changes) or "not enough data yet"
+	Bot.brainResult = profile.name .. ": " .. text
+	log("brain: " .. Bot.brainResult)
+	return text
+end
+
+---The profiles with the most watched time, for the window.
+---@return string
+function Bot.profileSummary()
+	local list = {}
+	for _, profile in pairs(Bot.profiles) do
+		table.insert(list, profile)
+	end
+
+	if #list == 0 then
+		return "none yet"
+	end
+
+	table.sort(list, function(a, b)
+		return a.style.time > b.style.time
+	end)
+
+	local parts = {}
+	for index = 1, math.min(#list, 3) do
+		table.insert(parts, string.format("%s %ds", list[index].name, list[index].style.time))
+	end
+
+	return table.concat(parts, ", ")
+end
+
+---Name a side dash by the tips: a hook follows a hit, circles are close, long arms use the full range.
+---@param distance number
+---@param sinceM1 number? Seconds since their last M1.
+---@return string
+function Bot.classifySide(distance, sinceM1)
+	if sinceM1 and sinceM1 < Settings.hookWindow then
+		return "hook"
+	end
+
+	return distance <= Settings.hookRange and "circle" or "longarm"
+end
+
+---Count one dash of a kind in a style.
+---@param style table
+---@param kind string FRONT, BACK or SIDE.
+---@param distance number
+---@param sinceM1 number?
+function Bot.countDash(style, kind, distance, sinceM1)
+	Bot.ensureTypes(style)
+	if kind == "FRONT" then
+		style.types.front += 1
+	elseif kind == "BACK" then
+		style.types.back += 1
+	else
+		local side = Bot.classifySide(distance, sinceM1)
+		style.types[side] += 1
+	end
+end
+
+---Count a dash the player just pressed while the style is learning from them.
+---@param dashKey Enum.KeyCode
+function Bot.countOwnDash(dashKey)
+	if not Bot.learningSelf() then
+		return
+	end
+
+	local style = Bot.style
+	style.dashes += 1
+
+	local now = os.clock()
+	local myRoot, opponent = Bot.myRoot, Bot.selfOpponent
+	local distance = 0
+	if myRoot and opponent and opponent.Parent and now - Bot.selfOpponentAt < 0.5 then
+		distance = ((opponent.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+	end
+
+	local since = Bot.selfLastM1 and now - Bot.selfLastM1 or nil
+	if dashKey == Enum.KeyCode.W then
+		Bot.countDash(style, "FRONT", distance, since)
+	elseif dashKey == Enum.KeyCode.S then
+		Bot.countDash(style, "BACK", distance, since)
+	elseif distance > 0 then
+		Bot.countDash(style, "SIDE", distance, since)
+	end
+end
+
+---Read a move's cooldown from the game's bar: nil when it is not shown.
+---@param name string
+---@return boolean?
+function Bot.cooldownState(name)
+	local bar = playerGui:FindFirstChild("Bar")
+	local magic = bar and bar:FindFirstChild("MagicHealth")
+	local cooldowns = magic and magic:FindFirstChild("cdholder")
+	local entry = cooldowns and cooldowns:FindFirstChild(name, true)
+	local template = entry and entry:FindFirstChild("template")
+	local fill = template and template:FindFirstChild("Fill")
+	if not fill then
+		return nil
+	end
+
+	return fill.Size.Y.Scale > 0.01
+end
+
+---Whether Backlash is available.
+---@return boolean
+function Bot.backlashReady()
+	if Settings.backlashMode == "Always" then
+		return true
+	elseif Settings.backlashMode == "Never" then
+		return false
+	end
+
+	return Bot.cooldownState(Settings.backlashName) == false
+end
+
+---Roll whether a long arm is worth it: common with Backlash up, a rare surprise otherwise.
+---@return boolean
+function Bot.longArmAllowed()
+	local chance = Bot.backlashReady() and Settings.longArmBacklash or Settings.longArmChance
+
+	-- Players who use long arms more than usual make the bot use them more.
+	local types = Bot.activeStyle().types
+	if Settings.styleUse and types then
+		local total = types.circle + types.longarm + types.hook
+		if total >= 6 then
+			chance = math.clamp(chance * (types.longarm / total) / 0.15, 0, 60)
+		end
+	end
+
+	return math.random() * 100 < chance
+end
+
+---Re-roll the long arm decision every couple of seconds.
+---@param now number
+function Bot.rollLongArm(now)
+	if now >= Bot.rollAt then
+		Bot.rollAt = now + 2
+		Bot.longArmOk = Bot.longArmAllowed()
+	end
+end
+
+---How often to hook away instead of backing straight off, from what was learned.
+---@return number
+function Bot.hookShare()
+	local types = Bot.activeStyle().types
+	if Settings.styleUse and types then
+		local total = types.hook + types.back
+		if total >= 6 then
+			return types.hook / total
+		end
+	end
+
+	return 0.6
+end
+
+---Close in with a side dash: a circle when close, a gated long arm when far.
+---@param myRoot BasePart
+---@param targetRoot BasePart
+---@param distance number
+---@return boolean
+function Bot.approachSide(myRoot, targetRoot, distance)
+	local key = math.random() < 0.5 and Enum.KeyCode.A or Enum.KeyCode.D
+
+	if distance <= Settings.hookRange then
+		if not Settings.botHook then
+			return false
+		end
+
+		Bot.dash(myRoot, targetRoot, key, true)
+		log(string.format("bot: circle dash (%d studs)", distance))
+		return true
+	end
+
+	if Settings.longArm and Bot.longArmOk and distance <= Settings.hookRange * 2.2 then
+		Bot.dash(myRoot, targetRoot, key, false)
+		log(string.format("bot: long arm (%d studs)", distance))
+		return true
+	end
+
+	return false
+end
+
+Bot.tips = {
+	{ key = "botHook", title = "Circle Dash", short = "Close side dash that wraps to their back" },
+	{ key = "longArm", title = "Long Arm", short = "Full range: only with Backlash or as a surprise" },
+	{ key = "hookAway", title = "Hook Away", short = "Dash away after a hit so they cannot M1 catch" },
+}
 
 ---Run every frame: recording, lock, study, assists and the fight bot.
 function Bot.update()
 	local now = os.clock()
 	local myCharacter, myRoot, myHumanoid = getMe()
 	Bot.myRoot = myRoot
+	Bot.ragdolled = myCharacter ~= nil and myHumanoid ~= nil and isRagdolled(myCharacter, myHumanoid)
 	Bot.updateRecording(now)
 	Bot.updateLesson(now, myRoot)
 
@@ -3829,6 +4781,7 @@ function Bot.update()
 	Bot.updateLockTarget(myCharacter, myRoot, now)
 	Bot.updateAssistTarget(myRoot)
 	Bot.updateStudy(myRoot, now)
+	Bot.updateBrain(myRoot, now)
 
 	if Bot.active then
 		Bot.fight(now, myCharacter, myRoot, myHumanoid)
@@ -5978,7 +6931,8 @@ local function buildGui()
 		addSlider(fight, "Hit Reach", "Swings inside this", "botReach", 3, 12, 0.5, " studs")
 		addSlider(fight, "Close Spacing", "Distance held while pressing", "botEngage", 2, 12, 0.5, " studs")
 		addSlider(fight, "M1 Rate", "Seconds between swings", "botM1Rate", 0.1, 0.5, 0.01, "s")
-		addSlider(fight, "String Pause", "Rest after four swings", "botComboPause", 0.2, 1.2, 0.05, "s")
+		addSlider(fight, "String Hits", "Swings per string", "botStringHits", 1, 8, 1, "")
+		addSlider(fight, "String Pause", "Rest after a string", "botComboPause", 0.2, 1.2, 0.05, "s")
 		addSwitch(fight, "Strafe", "Circle around the target", "botStrafe")
 		addSwitch(fight, "Wait Out Blocks", "No M1 into a blocking target", "botRespectBlock")
 		addSlider(fight, "Retreat Below", "Back off under this health, 0 = never", "botRetreatHp", 0, 60, 5, "%")
@@ -5991,14 +6945,26 @@ local function buildGui()
 		addSlider(neutral, "Punish Window", "Time after a whiff", "punishWindow", 0.2, 1.2, 0.05, "s")
 		addSwitch(neutral, "Neutral Side Dash", "Change angles with side dashes", "neutralDash")
 		addSwitch(neutral, "Back Step", "Back dash after a string", "botBackStep")
+		addSlider(neutral, "Back Step Range", "Back dash when closer than this", "backStepRange", 4, 20, 1, " studs")
+		addSlider(neutral, "Back Step Delay", "Wait after the string", "backStepDelay", 0, 0.6, 0.05, "s")
 
 		local gap = addSection(botPage, "Gap Close")
 		addSwitch(gap, "Dash In", "Dash to close distance", "botDashIn")
 		addSlider(gap, "Front Dash Range", "Front dash when farther than this", "botDashRange", 10, 60, 1, " studs")
 		addSwitch(gap, "Use Tech Dash", "Flick dash from the Tech page", "botUseTech")
-		addSwitch(gap, "Hook Dash", "Curved side dash into them", "botHook")
-		addSlider(gap, "Hook Range", "Hook dash up to this far", "hookRange", 6, 30, 1, " studs")
-		addSlider(gap, "Hook Angle", "How far the dash bends inward", "hookAngle", 0, 80, 5, "°")
+		addSlider(gap, "Circle Range", "Circle dash inside this (about 2.5 tiles)", "hookRange", 6, 30, 1, " studs")
+		addSlider(gap, "Circle Bend", "How far a circle dash bends inward", "hookAngle", 0, 80, 5, "°")
+
+		local tips = addSection(botPage, "Competitive Tips")
+		for _, tip in ipairs(Bot.tips) do
+			addSwitch(tips, tip.title, tip.short, tip.key)
+		end
+		addSlider(tips, "Long Arm Chance", "Surprise long arms", "longArmChance", 0, 60, 5, "%")
+		addSlider(tips, "Long Arm + Backlash", "Chance while Backlash is up", "longArmBacklash", 0, 80, 5, "%")
+		addCycle(tips, "Backlash", "Auto reads the cooldown bar", "backlashMode", { "Auto", "Always", "Never" })
+		addSlider(tips, "Hook Away Angle", "How far a hook bends away", "hookAwayAngle", 10, 90, 5, "°")
+		addSlider(tips, "Hook Window", "Side dash this soon after M1 is a hook", "hookWindow", 0.2, 1, 0.05, "s")
+		addSwitch(tips, "Fade Counter Dash", "Dash out when they counter dash", "hookFade")
 
 		local lock = addSection(botPage, "Lock On")
 		addInfo(lock, "Locked", function()
@@ -6021,7 +6987,7 @@ local function buildGui()
 		addSwitch(assist, "Side Dash", "Aim your A/D dash at the target", "assistSide")
 		addSwitch(assist, "Front Dash", "Aim your W dash at the target", "assistFront")
 		addSwitch(assist, "Back Dash", "Face them through your S dash", "assistBack")
-		addSwitch(assist, "Hook Side Dash", "Bend side dashes inward", "assistHook")
+		addSwitch(assist, "Circle Bend", "Bend close side dashes into a circle", "assistHook")
 		addSwitch(assist, "M1 After Dash", "Swing when the dash ends in reach", "assistM1")
 		addSlider(assist, "Assist Range", "Nearest target inside", "assistRange", 10, 100, 1, " studs")
 		addSlider(assist, "Face Tail", "Keep facing after the dash", "assistTail", 0, 0.8, 0.05, "s")
@@ -6054,6 +7020,39 @@ local function buildGui()
 		addSlider(combos, "Cooldown", "Between combos", "comboCooldown", 0.5, 8, 0.5, "s")
 		addSwitch(combos, "Cancel To Block", "Stop mid combo to block", "comboCancel")
 
+		local brain = addSection(botPage, "Brain")
+		addSwitch(brain, "Watch Players", "Learn from every player fighting nearby", "brainOn")
+		addSlider(brain, "Watch Range", "Players inside this", "brainRange", 20, 150, 5, " studs")
+		addCycle(brain, "Brain Mode", "Mine, a mentor, or all blended", "brainMode", { "Mine", "Mentor", "Blend" })
+		addCycle(brain, "Mentor", "Player to copy", "brainMentor", Bot.profileNames)
+		addInfo(brain, "Watching", function()
+			return string.format("%d now, %d profiles", Bot.brainWatching, #Bot.profileNames - 1)
+		end)
+		addInfo(brain, "Most Watched", Bot.profileSummary)
+		addInfo(brain, "Dash Types", function()
+			local types = Bot.activeStyle().types
+			return string.format("circle %d, long arm %d, hook %d, back %d", types.circle, types.longarm, types.hook, types.back)
+		end)
+		addAction(brain, "Adopt Mentor", "Copy their M1, dash and block numbers", "Adopt", function()
+			local profile = Bot.profiles[Settings.brainMentor]
+			if profile then
+				Bot.adoptProfile(profile)
+			else
+				Bot.brainResult = "pick a mentor first"
+			end
+		end)
+		addInfo(brain, "Result", function()
+			return Bot.brainResult
+		end)
+		addAction(brain, "Forget Mentor", "Delete that profile", "Forget", function()
+			Bot.forgetProfile(Settings.brainMentor)
+		end)
+		addAction(brain, "Forget All", "Delete every profile", "Wipe", function()
+			for name in pairs(table.clone(Bot.profiles)) do
+				Bot.forgetProfile(name)
+			end
+		end)
+
 		local style = addSection(botPage, "Strafe Style")
 		addSwitch(style, "Use Learned Style", "Spacing and timing from samples", "styleUse")
 		addSwitch(style, "Learn From You", "Study your own movement", "styleLearnSelf")
@@ -6077,9 +7076,9 @@ local function buildGui()
 			log(Bot.save() and "bot data saved" or "bot data save failed")
 		end)
 		addAction(style, "Reset Style", "Forget what was learned", "Reset", function()
-			local learnedStyle = Bot.style
-			learnedStyle.segments, learnedStyle.dist = {}, {}
-			learnedStyle.time, learnedStyle.pokes, learnedStyle.dashes = 0, 0, 0
+			for key, value in pairs(Bot.newStyle()) do
+				Bot.style[key] = value
+			end
 		end)
 	end
 
