@@ -6326,17 +6326,17 @@ local function outline(parent, transparency, thickness)
 end
 
 local UI_COLORS = {
-	card = Color3.fromRGB(5, 8, 16),
-	accent = Color3.fromRGB(35, 132, 255),
-	accentDark = Color3.fromRGB(95, 174, 255),
-	text = Color3.fromRGB(244, 248, 255),
-	dim = Color3.fromRGB(145, 160, 184),
-	off = Color3.fromRGB(13, 21, 37),
-	good = Color3.fromRGB(70, 235, 160),
+	card = Color3.fromRGB(20, 20, 23),
+	accent = Color3.fromRGB(169, 132, 255),
+	accentDark = Color3.fromRGB(112, 91, 171),
+	text = Color3.fromRGB(235, 232, 242),
+	dim = Color3.fromRGB(145, 140, 155),
+	off = Color3.fromRGB(30, 29, 34),
+	good = Color3.fromRGB(119, 211, 167),
 	now = Color3.fromRGB(255, 220, 120),
 	bad = Color3.fromRGB(255, 95, 120),
-	warn = Color3.fromRGB(255, 185, 90),
-	ink = Color3.fromRGB(2, 6, 14),
+	warn = Color3.fromRGB(232, 190, 125),
+	ink = Color3.fromRGB(12, 11, 15),
 }
 
 local rowOrder = setmetatable({}, { __mode = "k" })
@@ -6770,18 +6770,18 @@ local function buildGui()
 		GroupTransparency = 1,
 		Visible = false,
 	}, gui)
-	corner(window, 24)
+	corner(window, 18)
 	newInstance("UIGradient", {
 		Rotation = 135,
 		Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(14, 14, 14)),
-			ColorSequenceKeypoint.new(0.55, Color3.fromRGB(0, 0, 0)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(18, 18, 18)),
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(34, 32, 39)),
+			ColorSequenceKeypoint.new(0.55, Color3.fromRGB(17, 16, 20)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(25, 23, 30)),
 		}),
 	}, window)
 
 	-- Glowing edge that fades from the bottom left like the mockup.
-	local edge = newInstance("UIStroke", { Color = UI_COLORS.accent, Thickness = 2, Transparency = 0 }, window)
+	local edge = newInstance("UIStroke", { Color = UI_COLORS.accent, Thickness = 1.5, Transparency = 0.18 }, window)
 	newInstance("UIGradient", {
 		Rotation = 45,
 		Transparency = NumberSequence.new({
@@ -6823,7 +6823,7 @@ local function buildGui()
 		BorderSizePixel = 0,
 	}, window)
 	local particles = {}
-	for index = 1, 36 do
+	for index = 1, 48 do
 		local size = math.random(2, 4)
 		local dot = newInstance("Frame", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
@@ -6849,7 +6849,7 @@ local function buildGui()
 			x = math.random(),
 			y = math.random(),
 			vx = (math.random() - 0.5) * 0.02,
-			vy = -(0.008 + math.random() * 0.03),
+			vy = -(0.004 + math.random() * 0.012),
 			phase = math.random() * 6.28,
 			speed = 0.6 + math.random() * 1.6,
 		}
@@ -6882,17 +6882,17 @@ local function buildGui()
 	}, window)
 
 	local sidebar = newInstance("Frame", {
-		Name = "NavigationRail",
+		Name = "BrandRail",
 		Size = UDim2.new(0, sidebarWidth, 1, 0),
 		BackgroundColor3 = UI_COLORS.card,
 		BackgroundTransparency = 0.16,
 		BorderSizePixel = 0,
 	}, main)
-	corner(sidebar, 18)
+	corner(sidebar, 14)
 	outline(sidebar, 0.72, 1.2)
 	newInstance("UIGradient", {
 		Rotation = 90,
-		Color = ColorSequence.new(Color3.fromRGB(10, 22, 42), Color3.fromRGB(2, 5, 12)),
+		Color = ColorSequence.new(Color3.fromRGB(35, 32, 43), Color3.fromRGB(20, 19, 24)),
 	}, sidebar)
 
 	local topBar = newInstance("Frame", {
@@ -6910,8 +6910,8 @@ local function buildGui()
 		Active = true,
 	}, sidebar)
 	local badge = newInstance("Frame", {
-		Position = UDim2.new(0.5, -22, 0, 0),
-		Size = UDim2.fromOffset(44, 44),
+		Position = UDim2.new(0.5, -24, 0, 0),
+		Size = UDim2.fromOffset(48, 48),
 		BackgroundColor3 = UI_COLORS.accent,
 		BorderSizePixel = 0,
 	}, logoRow)
@@ -6930,7 +6930,7 @@ local function buildGui()
 		TextSize = 29,
 	}, badge)
 	newInstance("TextLabel", {
-		Position = UDim2.fromOffset(0, 48),
+		Position = UDim2.fromOffset(0, 52),
 		Size = UDim2.new(1, 0, 0, 24),
 		BackgroundTransparency = 1,
 		Text = "VANTA",
@@ -6943,10 +6943,10 @@ local function buildGui()
 		TextXAlignment = Enum.TextXAlignment.Center,
 	}, logoRow)
 	newInstance("TextLabel", {
-		Position = UDim2.fromOffset(0, 69),
+		Position = UDim2.fromOffset(0, 73),
 		Size = UDim2.new(1, 0, 0, 14),
 		BackgroundTransparency = 1,
-		Text = "EXECUTE. DOMINATE.",
+		Text = "PRECISION • CONTROL • PERFORMANCE",
 		TextColor3 = UI_COLORS.dim,
 		Font = Enum.Font.GothamMedium,
 		TextSize = compact and 6 or 8,
@@ -7069,28 +7069,31 @@ local function buildGui()
 
 	-- Vertical navigation rail: a different information architecture from the old tab strip.
 	local nav = newInstance("ScrollingFrame", {
-		Position = UDim2.fromOffset(6, 112),
-		Size = UDim2.new(1, -12, 1, -168),
-		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(sidebarWidth + 14, 48),
+		Size = UDim2.new(1, -sidebarWidth - 14, 0, 42),
+		BackgroundColor3 = Color3.fromRGB(25, 24, 29),
+		BackgroundTransparency = 0.12,
 		BorderSizePixel = 0,
-		ScrollBarThickness = 2,
+		ScrollBarThickness = 0,
 		ScrollBarImageColor3 = UI_COLORS.accent,
-		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		AutomaticCanvasSize = Enum.AutomaticSize.X,
 		CanvasSize = UDim2.new(),
-		ScrollingDirection = Enum.ScrollingDirection.Y,
-	}, sidebar)
+		ScrollingDirection = Enum.ScrollingDirection.X,
+	}, main)
+	corner(nav, 13)
+	outline(nav, 0.72, 1)
 	newInstance("UIListLayout", {
-		FillDirection = Enum.FillDirection.Vertical,
-		Padding = UDim.new(0, 7),
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 8),
 		SortOrder = Enum.SortOrder.LayoutOrder,
 	}, nav)
-	newInstance("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 2), PaddingBottom = UDim.new(0, 6) }, nav)
+	newInstance("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 8), PaddingTop = UDim.new(0, 3) }, nav)
 
 	local unload = newInstance("TextButton", {
-		Size = UDim2.new(1, -4, 0, 32),
+		Size = UDim2.fromOffset(88, 34),
 		BackgroundColor3 = UI_COLORS.off,
 		BackgroundTransparency = 0.25,
-		Text = "↪   Unload",
+		Text = "⏻  Unload",
 		TextColor3 = UI_COLORS.dim,
 		Font = Enum.Font.GothamBold,
 		TextSize = 11,
@@ -7105,8 +7108,8 @@ local function buildGui()
 	end)
 
 	local content = newInstance("Frame", {
-		Position = UDim2.fromOffset(sidebarWidth + 14, 50),
-		Size = UDim2.new(1, -sidebarWidth - 14, 1, -50),
+		Position = UDim2.fromOffset(sidebarWidth + 14, 98),
+		Size = UDim2.new(1, -sidebarWidth - 14, 1, -98),
 		BackgroundTransparency = 1,
 	}, main)
 
@@ -7121,6 +7124,7 @@ local function buildGui()
 			local active = tabName == name
 			if active then
 				entry.page.Visible = true
+				entry.page.Position = UDim2.fromOffset(0, 7)
 			else
 				task.delay(0.22, function()
 					if activeTab ~= tabName then
@@ -7129,7 +7133,7 @@ local function buildGui()
 				end)
 			end
 
-			tween(entry.page, { GroupTransparency = active and 0 or 1 })
+			tween(entry.page, { GroupTransparency = active and 0 or 1, Position = active and UDim2.fromOffset(0, 0) or UDim2.fromOffset(0, 4) })
 			tween(entry.tab, {
 				BackgroundTransparency = active and 0.08 or 1,
 				TextColor3 = active and UI_COLORS.text or UI_COLORS.dim,
@@ -7143,20 +7147,20 @@ local function buildGui()
 
 	local function addPage(name, order, icon)
 		local tab = newInstance("TextButton", {
-			Size = UDim2.new(1, -4, 0, 36),
+			Size = UDim2.fromOffset(compact and 104 or 118, 34),
 			BackgroundColor3 = UI_COLORS.accent,
 			BackgroundTransparency = 1,
 			Text = icon .. "   " .. name,
 			TextColor3 = UI_COLORS.dim,
-			TextXAlignment = Enum.TextXAlignment.Left,
+			TextXAlignment = Enum.TextXAlignment.Center,
 			Font = Enum.Font.GothamMedium,
-			TextSize = compact and 10 or 12,
+			TextSize = compact and 10 or 11,
 			TextTruncate = Enum.TextTruncate.AtEnd,
 			AutoButtonColor = false,
 			LayoutOrder = order,
 		}, nav)
 		newInstance("UICorner", { CornerRadius = UDim.new(0, 10) }, tab)
-		newInstance("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 8) }, tab)
+		newInstance("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, tab)
 		local tabStroke = outline(tab, 1, 1)
 
 		local indicator = newInstance("Frame", {
@@ -7201,8 +7205,8 @@ local function buildGui()
 	local home = addPage("Home", 0, "🏠")
 
 	local hero = newInstance("Frame", {
-		Size = UDim2.new(1, 0, 0, 140),
-		BackgroundColor3 = Color3.new(1, 1, 1),
+		Size = UDim2.new(1, 0, 0, 164),
+		BackgroundColor3 = Color3.fromRGB(39, 35, 48),
 		BorderSizePixel = 0,
 		ClipsDescendants = true,
 		LayoutOrder = 1,
@@ -7212,8 +7216,9 @@ local function buildGui()
 	newInstance("UIGradient", {
 		Rotation = 20,
 		Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 0, 0)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(30, 30, 30)),
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(48, 42, 61)),
+			ColorSequenceKeypoint.new(0.55, Color3.fromRGB(26, 24, 31)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(19, 18, 23)),
 		}),
 	}, hero)
 
@@ -7221,7 +7226,7 @@ local function buildGui()
 		Position = UDim2.fromOffset(20, 12),
 		Size = UDim2.fromOffset(200, 20),
 		BackgroundTransparency = 1,
-		Text = "WELCOME TO",
+		Text = "YOUR CONTROL CENTER",
 		TextColor3 = UI_COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.Gotham,
@@ -7266,8 +7271,8 @@ local function buildGui()
 	}, hero)
 
 	local getStarted = newInstance("TextButton", {
-		Position = UDim2.fromOffset(20, 106),
-		Size = UDim2.fromOffset(118, 28),
+		Position = UDim2.fromOffset(20, 122),
+		Size = UDim2.fromOffset(126, 30),
 		BackgroundColor3 = UI_COLORS.accent,
 		Text = "Get Started  ➜",
 		TextColor3 = UI_COLORS.ink,
@@ -7279,8 +7284,8 @@ local function buildGui()
 	addPress(getStarted)
 
 	local explore = newInstance("TextButton", {
-		Position = UDim2.fromOffset(146, 106),
-		Size = UDim2.fromOffset(116, 28),
+		Position = UDim2.fromOffset(154, 122),
+		Size = UDim2.fromOffset(116, 30),
 		BackgroundTransparency = 1,
 		Text = "Explore Tools",
 		TextColor3 = UI_COLORS.text,
