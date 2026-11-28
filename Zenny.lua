@@ -471,7 +471,7 @@ local function log(text)
 	end
 
 	if Settings.debugConsole then
-		print("[Slotted] " .. text)
+		print("[Vanta] " .. text)
 	end
 end
 
@@ -5860,7 +5860,7 @@ local function explainMiss(events)
 	end
 
 	if not detected then
-		return "Slotted never detected the animation. Learn it first, or check Broad Detection."
+		return "Vanta never detected the animation. Learn it first, or check Broad Detection."
 	end
 
 	if threat and not threat.threat then
@@ -6312,18 +6312,32 @@ local function corner(parent, radius)
 	return newInstance("UICorner", { CornerRadius = UDim.new(0, radius) }, parent)
 end
 
----Add a thin green outline to a gui object.
+---Add a thin blue outline to a gui object.
 ---@param parent GuiObject
 ---@param transparency number
 ---@param thickness number?
 local function outline(parent, transparency, thickness)
 	return newInstance("UIStroke", {
-		Color = COLORS.accent,
+		Color = Color3.fromRGB(35, 132, 255),
 		Transparency = transparency,
 		Thickness = thickness or 1,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 	}, parent)
 end
+
+local UI_COLORS = {
+	card = Color3.fromRGB(5, 8, 16),
+	accent = Color3.fromRGB(35, 132, 255),
+	accentDark = Color3.fromRGB(95, 174, 255),
+	text = Color3.fromRGB(244, 248, 255),
+	dim = Color3.fromRGB(145, 160, 184),
+	off = Color3.fromRGB(13, 21, 37),
+	good = Color3.fromRGB(70, 235, 160),
+	now = Color3.fromRGB(255, 220, 120),
+	bad = Color3.fromRGB(255, 95, 120),
+	warn = Color3.fromRGB(255, 185, 90),
+	ink = Color3.fromRGB(2, 6, 14),
+}
 
 local rowOrder = setmetatable({}, { __mode = "k" })
 local rowRegistry = {}
@@ -6379,7 +6393,7 @@ local function addSection(page, title)
 		Size = UDim2.new(1, 0, 0, 18),
 		BackgroundTransparency = 1,
 		Text = string.upper(title),
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
 		TextSize = 11,
@@ -6389,13 +6403,13 @@ local function addSection(page, title)
 	local card = newInstance("Frame", {
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = Color3.fromRGB(8, 8, 10),
-		BackgroundTransparency = 0.08,
+		BackgroundColor3 = UI_COLORS.card,
+		BackgroundTransparency = 0.2,
 		BorderSizePixel = 0,
 		LayoutOrder = nextOrder(page),
 	}, page)
 	corner(card, 14)
-	outline(card, 0.72, 1)
+	outline(card, 0.82)
 	newInstance("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, card)
 
 	sectionHeaders[card] = header
@@ -6424,7 +6438,7 @@ local function createRow(card, title, subtitle, className)
 		Size = UDim2.new(0.55, -14, 0, subtitle and 20 or 40),
 		BackgroundTransparency = 1,
 		Text = title,
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamMedium,
 		TextSize = 14,
@@ -6436,7 +6450,7 @@ local function createRow(card, title, subtitle, className)
 			Size = UDim2.new(0.55, -14, 0, 16),
 			BackgroundTransparency = 1,
 			Text = subtitle,
-			TextColor3 = COLORS.dim,
+			TextColor3 = UI_COLORS.dim,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			Font = Enum.Font.Gotham,
 			TextSize = 11,
@@ -6446,7 +6460,7 @@ local function createRow(card, title, subtitle, className)
 	newInstance("Frame", {
 		Position = UDim2.new(0, 14, 1, -1),
 		Size = UDim2.new(1, -28, 0, 1),
-		BackgroundColor3 = COLORS.accent,
+		BackgroundColor3 = UI_COLORS.accent,
 		BackgroundTransparency = 0.92,
 		BorderSizePixel = 0,
 	}, row)
@@ -6481,10 +6495,10 @@ local function addSwitch(card, title, subtitle, key)
 
 	local function refresh(animated)
 		local on = Settings[key]
-		local trackGoal = { BackgroundColor3 = on and COLORS.accent or COLORS.off }
+		local trackGoal = { BackgroundColor3 = on and UI_COLORS.accent or UI_COLORS.off }
 		local knobGoal = {
 			Position = on and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
-			BackgroundColor3 = on and COLORS.ink or COLORS.dim,
+			BackgroundColor3 = on and UI_COLORS.ink or UI_COLORS.dim,
 		}
 
 		if animated then
@@ -6532,14 +6546,14 @@ local function addSlider(card, title, subtitle, key, min, max, step, suffix)
 		AnchorPoint = Vector2.new(0, 0.5),
 		Position = UDim2.new(0, 0, 0.5, 0),
 		Size = UDim2.new(1, 0, 0, 6),
-		BackgroundColor3 = COLORS.off,
+		BackgroundColor3 = UI_COLORS.off,
 		BorderSizePixel = 0,
 	}, hit)
 	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
 
 	local fill = newInstance("Frame", {
 		Size = UDim2.fromScale(0, 1),
-		BackgroundColor3 = COLORS.accent,
+		BackgroundColor3 = UI_COLORS.accent,
 		BorderSizePixel = 0,
 	}, bar)
 	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, fill)
@@ -6558,7 +6572,7 @@ local function addSlider(card, title, subtitle, key, min, max, step, suffix)
 		Position = UDim2.new(1, -14, 0.5, 0),
 		Size = UDim2.fromOffset(64, 20),
 		BackgroundTransparency = 1,
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Right,
 		Font = Enum.Font.GothamBold,
 		TextSize = 12,
@@ -6621,7 +6635,7 @@ local function addCycle(card, title, subtitle, key, options)
 		Position = UDim2.new(1, -14, 0.5, 0),
 		Size = UDim2.fromOffset(110, 20),
 		BackgroundTransparency = 1,
-		TextColor3 = COLORS.accent,
+		TextColor3 = UI_COLORS.accent,
 		TextXAlignment = Enum.TextXAlignment.Right,
 		Font = Enum.Font.GothamBold,
 		TextSize = 13,
@@ -6652,9 +6666,9 @@ local function addAction(card, title, subtitle, buttonText, callback)
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -14, 0.5, 0),
 		Size = UDim2.fromOffset(92, 26),
-		BackgroundColor3 = COLORS.accent,
+		BackgroundColor3 = UI_COLORS.accent,
 		Text = buttonText,
-		TextColor3 = COLORS.ink,
+		TextColor3 = UI_COLORS.ink,
 		Font = Enum.Font.GothamBold,
 		TextSize = 12,
 		AutoButtonColor = false,
@@ -6677,7 +6691,7 @@ local function addInfo(card, title, getText)
 		Size = UDim2.new(0.45, 0, 0, 20),
 		BackgroundTransparency = 1,
 		Text = getText(),
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Right,
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
@@ -6726,7 +6740,7 @@ local INDICATOR_LIST = {
 
 ---Build the window, pages, quick pills and indicators.
 local function buildGui()
-	gui = newInstance("ScreenGui", { Name = "Slotted", ResetOnSpawn = false, DisplayOrder = 50 }, nil)
+	gui = newInstance("ScreenGui", { Name = "Vanta", ResetOnSpawn = false, DisplayOrder = 50 }, nil)
 
 	local parented = pcall(function()
 		gui.Parent = (gethui and gethui()) or coreGuiService
@@ -6735,15 +6749,16 @@ local function buildGui()
 		gui.Parent = playerGui
 	end
 
-	holder = newInstance("Folder", { Name = "ZennyObjects" }, gui)
+	holder = newInstance("Folder", { Name = "VantaObjects" }, gui)
 
 	local loadedAt = os.clock()
 	local camera = workspace.CurrentCamera
 	local viewport = camera and camera.ViewportSize or Vector2.new(800, 400)
-	local width = math.min(viewport.X - 24, 860)
-	local height = math.min(viewport.Y - 24, 500)
-	local compact = viewport.X < 620
+	local width = math.min(viewport.X - 24, 1080)
+	local height = math.min(viewport.Y - 24, 700)
 	local mainWidth = width - 20
+	local compact = width < 620
+	local sidebarWidth = compact and 88 or math.clamp(math.floor(width * 0.19), 132, 164)
 
 	local window = newInstance("CanvasGroup", {
 		Name = "Window",
@@ -6766,7 +6781,7 @@ local function buildGui()
 	}, window)
 
 	-- Glowing edge that fades from the bottom left like the mockup.
-	local edge = newInstance("UIStroke", { Color = COLORS.accent, Thickness = 2, Transparency = 0 }, window)
+	local edge = newInstance("UIStroke", { Color = UI_COLORS.accent, Thickness = 2, Transparency = 0 }, window)
 	newInstance("UIGradient", {
 		Rotation = 45,
 		Transparency = NumberSequence.new({
@@ -6785,11 +6800,11 @@ local function buildGui()
 		BorderSizePixel = 0,
 	}, window)
 	corner(innerGlow, 24)
-	newInstance("UIStroke", { Color = COLORS.accent, Thickness = 10, Transparency = 0.93 }, innerGlow)
+	newInstance("UIStroke", { Color = UI_COLORS.accent, Thickness = 10, Transparency = 0.93 }, innerGlow)
 	local topLight = newInstance("Frame", {
 		Name = "TopLight",
 		Size = UDim2.new(1, 0, 0, 110),
-		BackgroundColor3 = COLORS.accent,
+		BackgroundColor3 = UI_COLORS.accent,
 		BorderSizePixel = 0,
 	}, window)
 	newInstance("UIGradient", {
@@ -6813,7 +6828,7 @@ local function buildGui()
 		local dot = newInstance("Frame", {
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Size = UDim2.fromOffset(size, size),
-			BackgroundColor3 = COLORS.accent,
+			BackgroundColor3 = UI_COLORS.accent,
 			BackgroundTransparency = 0.3,
 			BorderSizePixel = 0,
 		}, particleLayer)
@@ -6822,7 +6837,7 @@ local function buildGui()
 			AnchorPoint = Vector2.new(0.5, 0.5),
 			Position = UDim2.fromScale(0.5, 0.5),
 			Size = UDim2.fromOffset(size * 6, size * 6),
-			BackgroundColor3 = COLORS.accent,
+			BackgroundColor3 = UI_COLORS.accent,
 			BackgroundTransparency = 0.92,
 			BorderSizePixel = 0,
 		}, dot)
@@ -6866,85 +6881,82 @@ local function buildGui()
 		BackgroundTransparency = 1,
 	}, window)
 
-	-- PHANTOM rail: a quiet glass spine that separates navigation from the workspace.
-	if not compact then
-		local rail = newInstance("Frame", {
-			Name = "PhantomRail",
-			Position = UDim2.fromOffset(0, 46),
-			Size = UDim2.new(0, 108, 1, -46),
-			BackgroundColor3 = Color3.fromRGB(7, 7, 9),
-			BackgroundTransparency = 0.12,
-			BorderSizePixel = 0,
-		}, main)
-		corner(rail, 17)
-		outline(rail, 0.78, 1)
-		local railGlow = newInstance("Frame", {
-			Position = UDim2.new(1, -2, 0, 14),
-			Size = UDim2.new(0, 1, 1, -28),
-			BackgroundColor3 = COLORS.accent,
-			BackgroundTransparency = 0.72,
-			BorderSizePixel = 0,
-		}, rail)
-		newInstance("UIGradient", {
-			Rotation = 90,
-			Transparency = NumberSequence.new({
-				NumberSequenceKeypoint.new(0, 1),
-				NumberSequenceKeypoint.new(0.18, 0.15),
-				NumberSequenceKeypoint.new(0.82, 0.15),
-				NumberSequenceKeypoint.new(1, 1),
-			}),
-		}, railGlow)
-	end
+	local sidebar = newInstance("Frame", {
+		Name = "NavigationRail",
+		Size = UDim2.new(0, sidebarWidth, 1, 0),
+		BackgroundColor3 = UI_COLORS.card,
+		BackgroundTransparency = 0.16,
+		BorderSizePixel = 0,
+	}, main)
+	corner(sidebar, 18)
+	outline(sidebar, 0.72, 1.2)
+	newInstance("UIGradient", {
+		Rotation = 90,
+		Color = ColorSequence.new(Color3.fromRGB(10, 22, 42), Color3.fromRGB(2, 5, 12)),
+	}, sidebar)
 
 	local topBar = newInstance("Frame", {
-		Size = UDim2.new(1, 0, 0, 40),
+		Position = UDim2.fromOffset(sidebarWidth + 14, 0),
+		Size = UDim2.new(1, -sidebarWidth - 14, 0, 42),
 		BackgroundTransparency = 1,
 		Active = true,
 	}, main)
 
-	-- Logo; dragging it moves the window like the top bar.
+	-- Brand block; dragging it moves the window like the top bar.
 	local logoRow = newInstance("Frame", {
-		Size = UDim2.fromOffset(112, 40),
+		Position = UDim2.fromOffset(0, 14),
+		Size = UDim2.new(1, 0, 0, 88),
 		BackgroundTransparency = 1,
 		Active = true,
-	}, topBar)
+	}, sidebar)
 	local badge = newInstance("Frame", {
-		Position = UDim2.fromOffset(2, 6),
-		Size = UDim2.fromOffset(28, 28),
-		BackgroundColor3 = COLORS.accent,
+		Position = UDim2.new(0.5, -22, 0, 0),
+		Size = UDim2.fromOffset(44, 44),
+		BackgroundColor3 = UI_COLORS.accent,
 		BorderSizePixel = 0,
 	}, logoRow)
 	corner(badge, 8)
 	newInstance("UIGradient", {
 		Rotation = 90,
-		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), COLORS.accentDark),
+		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), UI_COLORS.accentDark),
 	}, badge)
-	newInstance("UIStroke", { Color = COLORS.accent, Thickness = 3, Transparency = 0.8 }, badge)
+	newInstance("UIStroke", { Color = UI_COLORS.accent, Thickness = 3, Transparency = 0.8 }, badge)
 	newInstance("TextLabel", {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundTransparency = 1,
-		Text = "S",
-		TextColor3 = COLORS.ink,
+		Text = "V",
+		TextColor3 = UI_COLORS.ink,
 		Font = Enum.Font.GothamBlack,
-		TextSize = 18,
+		TextSize = 29,
 	}, badge)
 	newInstance("TextLabel", {
-		Position = UDim2.fromOffset(38, 0),
-		Size = UDim2.new(1, -38, 1, 0),
+		Position = UDim2.fromOffset(0, 48),
+		Size = UDim2.new(1, 0, 0, 24),
 		BackgroundTransparency = 1,
-		Text = "Slotted",
-		TextColor3 = COLORS.text,
-		TextStrokeColor3 = COLORS.accent,
+		Text = "VANTA",
+		TextColor3 = UI_COLORS.text,
+		TextStrokeColor3 = UI_COLORS.accent,
 		TextStrokeTransparency = 0.8,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
-		TextSize = 19,
+		TextSize = 20,
+		TextXAlignment = Enum.TextXAlignment.Center,
+	}, logoRow)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(0, 69),
+		Size = UDim2.new(1, 0, 0, 14),
+		BackgroundTransparency = 1,
+		Text = "EXECUTE. DOMINATE.",
+		TextColor3 = UI_COLORS.dim,
+		Font = Enum.Font.GothamMedium,
+		TextSize = compact and 6 or 8,
+		TextXAlignment = Enum.TextXAlignment.Center,
 	}, logoRow)
 
 	local search = newInstance("Frame", {
-		Size = UDim2.new(1, -(118 + 240), 0, 34),
-		Position = UDim2.fromOffset(118, 3),
-		BackgroundColor3 = COLORS.card,
+		Size = UDim2.new(1, compact and -72 or -260, 0, 34),
+		Position = UDim2.fromOffset(0, 3),
+		BackgroundColor3 = UI_COLORS.card,
 		BackgroundTransparency = 0.2,
 		BorderSizePixel = 0,
 	}, topBar)
@@ -6955,7 +6967,7 @@ local function buildGui()
 		Size = UDim2.fromOffset(20, 34),
 		BackgroundTransparency = 1,
 		Text = "🔍",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		TextSize = 14,
 		Font = Enum.Font.Gotham,
 	}, search)
@@ -6964,9 +6976,9 @@ local function buildGui()
 		Size = UDim2.new(1, -44, 1, 0),
 		BackgroundTransparency = 1,
 		PlaceholderText = "Search features...",
-		PlaceholderColor3 = COLORS.dim,
+		PlaceholderColor3 = UI_COLORS.dim,
 		Text = "",
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		ClearTextOnFocus = false,
 		Font = Enum.Font.Gotham,
@@ -6980,7 +6992,7 @@ local function buildGui()
 		Size = UDim2.fromOffset(28, 28),
 		BackgroundTransparency = 1,
 		Text = "✕",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		Font = Enum.Font.GothamBold,
 		TextSize = 14,
 		AutoButtonColor = false,
@@ -6991,7 +7003,7 @@ local function buildGui()
 		Size = UDim2.fromOffset(28, 28),
 		BackgroundTransparency = 1,
 		Text = "—",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		Font = Enum.Font.GothamBold,
 		TextSize = 14,
 		AutoButtonColor = false,
@@ -7000,9 +7012,9 @@ local function buildGui()
 	-- User chip.
 	local chip = newInstance("Frame", {
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -62, 0.5, 0),
-		Size = UDim2.fromOffset(132, 36),
-		BackgroundColor3 = COLORS.card,
+		Position = UDim2.new(1, -66, 0.5, 0),
+		Size = UDim2.fromOffset(112, 34),
+		BackgroundColor3 = UI_COLORS.card,
 		BackgroundTransparency = 0.2,
 		BorderSizePixel = 0,
 	}, topBar)
@@ -7012,7 +7024,7 @@ local function buildGui()
 	local avatar = newInstance("ImageLabel", {
 		Position = UDim2.fromOffset(4, 4),
 		Size = UDim2.fromOffset(28, 28),
-		BackgroundColor3 = COLORS.off,
+		BackgroundColor3 = UI_COLORS.off,
 		Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", localPlayer.UserId),
 		BorderSizePixel = 0,
 	}, chip)
@@ -7024,7 +7036,7 @@ local function buildGui()
 		Size = UDim2.new(1, -44, 0, 16),
 		BackgroundTransparency = 1,
 		Text = localPlayer.DisplayName,
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Font = Enum.Font.GothamMedium,
@@ -7035,54 +7047,53 @@ local function buildGui()
 		Size = UDim2.new(1, -44, 0, 14),
 		BackgroundTransparency = 1,
 		Text = "● Online",
-		TextColor3 = COLORS.accent,
+		TextColor3 = UI_COLORS.accent,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.Gotham,
 		TextSize = 10,
 	}, chip)
+	chip.Visible = not compact
 
 	local bell = newInstance("TextButton", {
 		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -200, 0.5, 0),
+		Position = UDim2.new(1, -184, 0.5, 0),
 		Size = UDim2.fromOffset(32, 32),
 		BackgroundTransparency = 1,
 		Text = "🔔",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		Font = Enum.Font.Gotham,
 		TextSize = 16,
 		AutoButtonColor = false,
 	}, topBar)
+	bell.Visible = not compact
 
-	-- Horizontal tab strip under the top bar.
+	-- Vertical navigation rail: a different information architecture from the old tab strip.
 	local nav = newInstance("ScrollingFrame", {
-		Position = compact and UDim2.fromOffset(0, 44) or UDim2.fromOffset(0, 52),
-		Size = compact and UDim2.new(1, 0, 0, 34) or UDim2.new(0, 108, 1, -104),
+		Position = UDim2.fromOffset(6, 112),
+		Size = UDim2.new(1, -12, 1, -168),
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
-		ScrollBarThickness = 0,
-		AutomaticCanvasSize = compact and Enum.AutomaticSize.X or Enum.AutomaticSize.Y,
+		ScrollBarThickness = 2,
+		ScrollBarImageColor3 = UI_COLORS.accent,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		CanvasSize = UDim2.new(),
-		ScrollingDirection = compact and Enum.ScrollingDirection.X or Enum.ScrollingDirection.Y,
-	}, main)
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+	}, sidebar)
 	newInstance("UIListLayout", {
-		FillDirection = compact and Enum.FillDirection.Horizontal or Enum.FillDirection.Vertical,
-		Padding = UDim.new(0, compact and 6 or 7),
+		FillDirection = Enum.FillDirection.Vertical,
+		Padding = UDim.new(0, 7),
 		SortOrder = Enum.SortOrder.LayoutOrder,
-		VerticalAlignment = compact and Enum.VerticalAlignment.Center or Enum.VerticalAlignment.Top,
 	}, nav)
-	newInstance("UIPadding", {
-		PaddingLeft = UDim.new(0, compact and 2 or 6),
-		PaddingRight = UDim.new(0, compact and 2 or 6),
-		PaddingTop = UDim.new(0, compact and 0 or 10),
-	}, nav)
+	newInstance("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 2), PaddingBottom = UDim.new(0, 6) }, nav)
 
 	local unload = newInstance("TextButton", {
-		Size = compact and UDim2.fromOffset(70, 28) or UDim2.new(1, -4, 0, 32),
-		BackgroundTransparency = 1,
-		Text = "Unload",
-		TextColor3 = COLORS.accent,
+		Size = UDim2.new(1, -4, 0, 32),
+		BackgroundColor3 = UI_COLORS.off,
+		BackgroundTransparency = 0.25,
+		Text = "↪   Unload",
+		TextColor3 = UI_COLORS.dim,
 		Font = Enum.Font.GothamBold,
-		TextSize = 12,
+		TextSize = 11,
 		AutoButtonColor = false,
 		LayoutOrder = 99,
 	}, nav)
@@ -7094,8 +7105,8 @@ local function buildGui()
 	end)
 
 	local content = newInstance("Frame", {
-		Position = compact and UDim2.fromOffset(0, 84) or UDim2.fromOffset(124, 48),
-		Size = compact and UDim2.new(1, 0, 1, -84) or UDim2.new(1, -124, 1, -48),
+		Position = UDim2.fromOffset(sidebarWidth + 14, 50),
+		Size = UDim2.new(1, -sidebarWidth - 14, 1, -50),
 		BackgroundTransparency = 1,
 	}, main)
 
@@ -7120,38 +7131,39 @@ local function buildGui()
 
 			tween(entry.page, { GroupTransparency = active and 0 or 1 })
 			tween(entry.tab, {
-				BackgroundTransparency = active and 0.88 or 1,
-				TextColor3 = active and COLORS.text or COLORS.dim,
+				BackgroundTransparency = active and 0.08 or 1,
+				TextColor3 = active and UI_COLORS.text or UI_COLORS.dim,
 			})
 			tween(entry.indicator, { BackgroundTransparency = active and 0 or 1 })
+			if entry.stroke then
+				tween(entry.stroke, { Transparency = active and 0.22 or 1 })
+			end
 		end
 	end
 
 	local function addPage(name, order, icon)
 		local tab = newInstance("TextButton", {
-			Size = compact and UDim2.fromOffset(0, 28) or UDim2.new(1, -4, 0, 36),
-			AutomaticSize = compact and Enum.AutomaticSize.X or Enum.AutomaticSize.None,
-			BackgroundColor3 = COLORS.accent,
+			Size = UDim2.new(1, -4, 0, 36),
+			BackgroundColor3 = UI_COLORS.accent,
 			BackgroundTransparency = 1,
-			Text = icon .. "  " .. name,
-			TextXAlignment = compact and Enum.TextXAlignment.Center or Enum.TextXAlignment.Left,
-			TextColor3 = COLORS.dim,
+			Text = icon .. "   " .. name,
+			TextColor3 = UI_COLORS.dim,
+			TextXAlignment = Enum.TextXAlignment.Left,
 			Font = Enum.Font.GothamMedium,
-			TextSize = 13,
+			TextSize = compact and 10 or 12,
+			TextTruncate = Enum.TextTruncate.AtEnd,
 			AutoButtonColor = false,
 			LayoutOrder = order,
 		}, nav)
-		newInstance("UICorner", { CornerRadius = UDim.new(0, compact and 14 or 11) }, tab)
-		newInstance("UIPadding", {
-			PaddingLeft = UDim.new(0, compact and 14 or 10),
-			PaddingRight = UDim.new(0, compact and 14 or 6),
-		}, tab)
+		newInstance("UICorner", { CornerRadius = UDim.new(0, 10) }, tab)
+		newInstance("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 8) }, tab)
+		local tabStroke = outline(tab, 1, 1)
 
 		local indicator = newInstance("Frame", {
-			AnchorPoint = compact and Vector2.new(0.5, 1) or Vector2.new(0, 0.5),
-			Position = compact and UDim2.new(0.5, 0, 1, 0) or UDim2.new(0, 3, 0.5, 0),
-			Size = compact and UDim2.new(0.5, 0, 0, 2) or UDim2.new(0, 2, 0.58, 0),
-			BackgroundColor3 = COLORS.accent,
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 0, 0.5, 0),
+			Size = UDim2.new(0, 3, 0, 18),
+			BackgroundColor3 = UI_COLORS.accent,
 			BackgroundTransparency = 1,
 			BorderSizePixel = 0,
 		}, tab)
@@ -7175,7 +7187,7 @@ local function buildGui()
 		newInstance("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, scroll)
 		newInstance("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 12), PaddingRight = UDim.new(0, 2) }, scroll)
 
-		tabs[name] = { tab = tab, page = page, indicator = indicator }
+		tabs[name] = { tab = tab, page = page, indicator = indicator, stroke = tabStroke }
 		pageOfScroll[scroll] = name
 		table.insert(tabOrder, name)
 		connect(tab.MouseButton1Click, function()
@@ -7189,7 +7201,7 @@ local function buildGui()
 	local home = addPage("Home", 0, "🏠")
 
 	local hero = newInstance("Frame", {
-		Size = UDim2.new(1, 0, 0, 162),
+		Size = UDim2.new(1, 0, 0, 140),
 		BackgroundColor3 = Color3.new(1, 1, 1),
 		BorderSizePixel = 0,
 		ClipsDescendants = true,
@@ -7209,55 +7221,56 @@ local function buildGui()
 		Position = UDim2.fromOffset(20, 12),
 		Size = UDim2.fromOffset(200, 20),
 		BackgroundTransparency = 1,
-		Text = "Welcome to",
-		TextColor3 = COLORS.text,
+		Text = "WELCOME TO",
+		TextColor3 = UI_COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.Gotham,
 		TextSize = 15,
 	}, hero)
 	local heroTitle = newInstance("TextLabel", {
-		Position = UDim2.fromOffset(20, 30),
-		Size = UDim2.fromOffset(240, 46),
+		Position = UDim2.fromOffset(20, 28),
+		Size = UDim2.fromOffset(280, 48),
 		BackgroundTransparency = 1,
-		Text = "Slotted",
+		Text = "VANTA",
 		TextColor3 = Color3.new(1, 1, 1),
-		TextStrokeColor3 = COLORS.accent,
+		TextStrokeColor3 = UI_COLORS.accent,
 		TextStrokeTransparency = 0.85,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBlack,
-		TextSize = 42,
+		TextSize = compact and 32 or 42,
 	}, hero)
 	newInstance("UIGradient", {
 		Rotation = 90,
-		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), COLORS.accentDark),
+		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), UI_COLORS.accentDark),
 	}, heroTitle)
 	newInstance("TextLabel", {
-		Position = UDim2.fromOffset(20, 80),
-		Size = UDim2.fromOffset(260, 20),
+		Position = UDim2.fromOffset(20, 75),
+		Size = UDim2.fromOffset(260, 18),
 		BackgroundTransparency = 1,
-		Text = "PHANTOM  //  SYSTEM ONLINE",
-		TextColor3 = COLORS.accent,
+		Text = "EXECUTE. DOMINATE.",
+		TextColor3 = UI_COLORS.accent,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
 		TextSize = 14,
 	}, hero)
 	newInstance("TextLabel", {
-		Position = UDim2.fromOffset(20, 102),
-		Size = UDim2.fromOffset(250, 16),
+		Position = UDim2.fromOffset(20, 92),
+		Size = UDim2.fromOffset(250, 14),
 		BackgroundTransparency = 1,
-		Text = "A sharper interface for Slotted.",
-		TextColor3 = COLORS.dim,
+		Text = "A cleaner command center for your setup.",
+		TextColor3 = UI_COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.Gotham,
 		TextSize = 11,
+		Visible = false,
 	}, hero)
 
 	local getStarted = newInstance("TextButton", {
-		Position = UDim2.fromOffset(20, 124),
-		Size = UDim2.fromOffset(118, 30),
-		BackgroundColor3 = COLORS.accent,
+		Position = UDim2.fromOffset(20, 106),
+		Size = UDim2.fromOffset(118, 28),
+		BackgroundColor3 = UI_COLORS.accent,
 		Text = "Get Started  ➜",
-		TextColor3 = COLORS.ink,
+		TextColor3 = UI_COLORS.ink,
 		Font = Enum.Font.GothamBold,
 		TextSize = 12,
 		AutoButtonColor = false,
@@ -7266,11 +7279,11 @@ local function buildGui()
 	addPress(getStarted)
 
 	local explore = newInstance("TextButton", {
-		Position = UDim2.fromOffset(146, 124),
-		Size = UDim2.fromOffset(116, 30),
+		Position = UDim2.fromOffset(146, 106),
+		Size = UDim2.fromOffset(116, 28),
 		BackgroundTransparency = 1,
 		Text = "Explore Tools",
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
 		AutoButtonColor = false,
@@ -7278,19 +7291,21 @@ local function buildGui()
 	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, explore)
 	outline(explore, 0.4, 1.5)
 	addPress(explore)
+	explore.Visible = not compact
 
 	-- Orbit ring around a big Z, like the logo in the mockup.
 	local emblem = newInstance("Frame", {
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -26, 0.5, 0),
-		Size = UDim2.fromOffset(132, 132),
+		Size = UDim2.fromOffset(92, 92),
 		BackgroundTransparency = 1,
 	}, hero)
+	emblem.Visible = not compact
 	local glow = newInstance("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.fromOffset(96, 96),
-		BackgroundColor3 = COLORS.accent,
+		Size = UDim2.fromOffset(68, 68),
+		BackgroundColor3 = UI_COLORS.accent,
 		BackgroundTransparency = 0.88,
 		BorderSizePixel = 0,
 	}, emblem)
@@ -7298,7 +7313,7 @@ local function buildGui()
 	local ring = newInstance("Frame", {
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.fromOffset(128, 128),
+		Size = UDim2.fromOffset(88, 88),
 		BackgroundTransparency = 1,
 	}, emblem)
 	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, ring)
@@ -7313,14 +7328,14 @@ local function buildGui()
 	local bigZ = newInstance("TextLabel", {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundTransparency = 1,
-		Text = "S",
+		Text = "V",
 		TextColor3 = Color3.new(1, 1, 1),
 		Font = Enum.Font.GothamBlack,
-		TextSize = 78,
+		TextSize = 58,
 	}, emblem)
 	newInstance("UIGradient", {
 		Rotation = 90,
-		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), COLORS.accentDark),
+		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), UI_COLORS.accentDark),
 	}, bigZ)
 
 	connect(runService.RenderStepped, function(delta)
@@ -7355,7 +7370,7 @@ local function buildGui()
 	local function addStat(order, icon, title, barCount)
 		local card = newInstance("Frame", {
 			Size = UDim2.new(1 / 3, -6, 1, 0),
-			BackgroundColor3 = COLORS.card,
+			BackgroundColor3 = UI_COLORS.card,
 			BackgroundTransparency = 0.2,
 			BorderSizePixel = 0,
 			LayoutOrder = order,
@@ -7366,30 +7381,31 @@ local function buildGui()
 		local box = newInstance("TextLabel", {
 			Position = UDim2.fromOffset(10, 15),
 			Size = UDim2.fromOffset(36, 36),
-			BackgroundColor3 = COLORS.off,
+			BackgroundColor3 = UI_COLORS.off,
 			Text = icon,
-			TextColor3 = COLORS.accent,
+			TextColor3 = UI_COLORS.accent,
 			Font = Enum.Font.GothamBold,
 			TextSize = 16,
 		}, card)
 		corner(box, 10)
 
-		newInstance("TextLabel", {
-			Position = UDim2.fromOffset(54, 12),
-			Size = UDim2.new(0.5, -40, 0, 14),
+		local titleLabel = newInstance("TextLabel", {
+			Position = compact and UDim2.fromOffset(8, 7) or UDim2.fromOffset(54, 12),
+			Size = compact and UDim2.new(1, -16, 0, 14) or UDim2.new(0.5, -40, 0, 14),
 			BackgroundTransparency = 1,
-			Text = title,
-			TextColor3 = COLORS.dim,
+			Text = compact and (order == 2 and "Modules" or title) or title,
+			TextColor3 = UI_COLORS.dim,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			Font = Enum.Font.Gotham,
-			TextSize = 10,
+			TextSize = compact and 8 or 10,
+			TextTruncate = Enum.TextTruncate.AtEnd,
 		}, card)
 		local value = newInstance("TextLabel", {
-			Position = UDim2.fromOffset(54, 28),
-			Size = UDim2.new(0.5, -40, 0, 26),
+			Position = compact and UDim2.fromOffset(8, 28) or UDim2.fromOffset(54, 28),
+			Size = compact and UDim2.new(1, -16, 0, 26) or UDim2.new(0.5, -40, 0, 26),
 			BackgroundTransparency = 1,
 			Text = "-",
-			TextColor3 = COLORS.text,
+			TextColor3 = UI_COLORS.text,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			Font = Enum.Font.GothamBold,
 			TextSize = 17,
@@ -7406,12 +7422,16 @@ local function buildGui()
 			VerticalAlignment = Enum.VerticalAlignment.Bottom,
 			Padding = UDim.new(0, 2),
 		}, bars)
+		if compact then
+			box.Visible = false
+			bars.Visible = false
+		end
 
 		local list = {}
 		for index = 1, barCount do
 			local bar = newInstance("Frame", {
 				Size = UDim2.new(1 / barCount, -2, 0.2, 0),
-				BackgroundColor3 = COLORS.accent,
+				BackgroundColor3 = UI_COLORS.accent,
 				BackgroundTransparency = 0.2,
 				BorderSizePixel = 0,
 				LayoutOrder = index,
@@ -7425,13 +7445,85 @@ local function buildGui()
 
 	local fpsValue, fpsBars = addStat(1, "⚡", "FPS", 8)
 	local moduleValue, moduleBars = addStat(2, "▣", "Active Modules", 8)
-	local runtimeValue, runtimeBars = addStat(3, "🕒", "Runtime", 8)
+	local runtimeValue, runtimeBars = addStat(3, "◷", "Runtime", 8)
+
+	-- Category launcher: the home screen is now a command hub, not a stack of old cards.
+	local categoryWrap = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 132),
+		BackgroundTransparency = 1,
+		LayoutOrder = 3,
+	}, home)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(2, 0),
+		Size = UDim2.new(1, -4, 0, 20),
+		BackgroundTransparency = 1,
+		Text = "FEATURE HUB",
+		TextColor3 = UI_COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+	}, categoryWrap)
+	local categoryGrid = newInstance("Frame", {
+		Position = UDim2.fromOffset(0, 24),
+		Size = UDim2.new(1, 0, 1, -24),
+		BackgroundTransparency = 1,
+	}, categoryWrap)
+	newInstance("UIGridLayout", {
+		CellSize = UDim2.new(0.5, -5, 0, 48),
+		CellPadding = UDim2.fromOffset(8, 7),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, categoryGrid)
+	for index, item in ipairs({
+		{ "⚔", "Combat", "Combat" },
+		{ "◉", "Visuals", "Visuals" },
+		{ "⌘", "Movement & Dashes", "Dashes" },
+		{ "✦", "Lab & Training", "Lab" },
+	}) do
+		local category = newInstance("TextButton", {
+			BackgroundColor3 = UI_COLORS.off,
+			BackgroundTransparency = 0.12,
+			Text = "",
+			AutoButtonColor = false,
+			LayoutOrder = index,
+		}, categoryGrid)
+		corner(category, 11)
+		local categoryStroke = outline(category, 0.72, 1)
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(12, 0),
+			Size = UDim2.fromOffset(26, 48),
+			BackgroundTransparency = 1,
+			Text = item[1],
+			TextColor3 = UI_COLORS.accent,
+			Font = Enum.Font.GothamBold,
+			TextSize = 20,
+		}, category)
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(44, 0),
+			Size = UDim2.new(1, -54, 1, 0),
+			BackgroundTransparency = 1,
+			Text = (compact and item[3] == "Dashes" and "Dashes" or (compact and item[3] == "Lab" and "Lab" or item[2])) .. "   →",
+			TextColor3 = UI_COLORS.text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 11,
+		}, category)
+		addPress(category)
+		connect(category.MouseButton1Click, function()
+			selectTab(item[3])
+		end)
+		connect(category.MouseEnter, function()
+			tween(categoryStroke, { Transparency = 0.18 }, QUICK)
+		end)
+		connect(category.MouseLeave, function()
+			tween(categoryStroke, { Transparency = 0.72 }, QUICK)
+		end)
+	end
 
 	-- Quick actions and system status.
 	local lowerRow = newInstance("Frame", {
-		Size = UDim2.new(1, 0, 0, 126),
+		Size = compact and UDim2.new(1, 0, 0, 170) or UDim2.new(1, 0, 0, 112),
 		BackgroundTransparency = 1,
-		LayoutOrder = 3,
+		LayoutOrder = 4,
 	}, home)
 	newInstance("UIListLayout", {
 		FillDirection = Enum.FillDirection.Horizontal,
@@ -7440,8 +7532,8 @@ local function buildGui()
 	}, lowerRow)
 
 	local quickCard = newInstance("Frame", {
-		Size = UDim2.new(0.66, -4, 1, 0),
-		BackgroundColor3 = COLORS.card,
+		Size = compact and UDim2.new(1, 0, 1, 0) or UDim2.new(0.66, -4, 1, 0),
+		BackgroundColor3 = UI_COLORS.card,
 		BackgroundTransparency = 0.2,
 		BorderSizePixel = 0,
 		LayoutOrder = 1,
@@ -7453,7 +7545,7 @@ local function buildGui()
 		Size = UDim2.fromOffset(140, 22),
 		BackgroundTransparency = 1,
 		Text = "Quick Actions",
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
 		TextSize = 13,
@@ -7464,7 +7556,7 @@ local function buildGui()
 		Size = UDim2.fromOffset(70, 22),
 		BackgroundTransparency = 1,
 		Text = "View All ➜",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Right,
 		Font = Enum.Font.Gotham,
 		TextSize = 11,
@@ -7476,12 +7568,13 @@ local function buildGui()
 
 	local tileGrid = newInstance("Frame", {
 		Position = UDim2.fromOffset(10, 34),
-		Size = UDim2.new(1, -20, 1, -42),
+		Size = UDim2.new(1, -20, 1, -38),
 		BackgroundTransparency = 1,
 	}, quickCard)
-	local tileWidth = math.max(math.floor((mainWidth * 0.66 - 4 - 20 - 18) / 4), 44)
+	local dashboardWidth = width - 20 - sidebarWidth - 14
+	local tileWidth = compact and math.floor((dashboardWidth - 32) / 2) or math.max(math.floor((dashboardWidth * 0.66 - 38) / 4), 44)
 	newInstance("UIGridLayout", {
-		CellSize = UDim2.fromOffset(tileWidth, 78),
+		CellSize = UDim2.fromOffset(tileWidth, 62),
 		CellPadding = UDim2.fromOffset(6, 6),
 		SortOrder = Enum.SortOrder.LayoutOrder,
 	}, tileGrid)
@@ -7494,7 +7587,7 @@ local function buildGui()
 		{ "Front Dash Block", "frontBlock", "⚡" },
 	}) do
 		local tile = newInstance("TextButton", {
-			BackgroundColor3 = COLORS.off,
+			BackgroundColor3 = UI_COLORS.off,
 			BackgroundTransparency = 0.45,
 			Text = "",
 			AutoButtonColor = false,
@@ -7509,7 +7602,7 @@ local function buildGui()
 			Size = UDim2.fromOffset(28, 26),
 			BackgroundTransparency = 1,
 			Text = info[3],
-			TextColor3 = COLORS.accent,
+			TextColor3 = UI_COLORS.accent,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			Font = Enum.Font.Gotham,
 			TextSize = 20,
@@ -7519,7 +7612,7 @@ local function buildGui()
 			Size = UDim2.new(1, -12, 0, 34),
 			BackgroundTransparency = 1,
 			Text = info[1],
-			TextColor3 = COLORS.text,
+			TextColor3 = UI_COLORS.text,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			TextYAlignment = Enum.TextYAlignment.Top,
 			TextWrapped = true,
@@ -7540,19 +7633,20 @@ local function buildGui()
 
 	local statusCard = newInstance("Frame", {
 		Size = UDim2.new(0.34, -4, 1, 0),
-		BackgroundColor3 = COLORS.card,
+		BackgroundColor3 = UI_COLORS.card,
 		BackgroundTransparency = 0.2,
 		BorderSizePixel = 0,
 		LayoutOrder = 2,
 	}, lowerRow)
 	corner(statusCard, 14)
 	outline(statusCard, 0.8)
+	statusCard.Visible = not compact
 	newInstance("TextLabel", {
 		Position = UDim2.fromOffset(14, 8),
 		Size = UDim2.new(1, -28, 0, 22),
 		BackgroundTransparency = 1,
 		Text = "System Status",
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
 		TextSize = 13,
@@ -7560,7 +7654,7 @@ local function buildGui()
 	local statusDot = newInstance("Frame", {
 		Position = UDim2.fromOffset(14, 42),
 		Size = UDim2.fromOffset(8, 8),
-		BackgroundColor3 = COLORS.accent,
+		BackgroundColor3 = UI_COLORS.accent,
 		BorderSizePixel = 0,
 	}, statusCard)
 	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, statusDot)
@@ -7569,7 +7663,7 @@ local function buildGui()
 		Size = UDim2.new(1, -36, 0, 20),
 		BackgroundTransparency = 1,
 		Text = "All Systems Operational",
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Font = Enum.Font.Gotham,
@@ -7580,7 +7674,7 @@ local function buildGui()
 		Size = UDim2.new(1, -28, 0, 50),
 		BackgroundTransparency = 1,
 		Text = "",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextYAlignment = Enum.TextYAlignment.Top,
 		TextWrapped = true,
@@ -7792,7 +7886,7 @@ local function buildGui()
 	-- Rotating copy of your character.
 	local previewCard = newInstance("Frame", {
 		Size = UDim2.new(0, 150, 1, 0),
-		BackgroundColor3 = COLORS.card,
+		BackgroundColor3 = UI_COLORS.card,
 		BackgroundTransparency = 0.2,
 		BorderSizePixel = 0,
 	}, labTop)
@@ -7810,7 +7904,7 @@ local function buildGui()
 		Size = UDim2.new(1, 0, 0, 20),
 		BackgroundTransparency = 1,
 		Text = "Drag to spin",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		Font = Enum.Font.Gotham,
 		TextSize = 10,
 	}, previewCard)
@@ -7904,7 +7998,7 @@ local function buildGui()
 	local resultCard = newInstance("Frame", {
 		Position = UDim2.fromOffset(158, 0),
 		Size = UDim2.new(1, -158, 1, 0),
-		BackgroundColor3 = COLORS.card,
+		BackgroundColor3 = UI_COLORS.card,
 		BackgroundTransparency = 0.2,
 		BorderSizePixel = 0,
 	}, labTop)
@@ -7916,7 +8010,7 @@ local function buildGui()
 		Size = UDim2.new(1, -28, 0, 14),
 		BackgroundTransparency = 1,
 		Text = "RESULT",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
 		TextSize = 10,
@@ -7926,7 +8020,7 @@ local function buildGui()
 		Size = UDim2.new(1, -28, 0, 30),
 		BackgroundTransparency = 1,
 		Text = "Ready",
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Font = Enum.Font.GothamBlack,
@@ -7937,7 +8031,7 @@ local function buildGui()
 		Size = UDim2.new(1, -28, 0, 70),
 		BackgroundTransparency = 1,
 		Text = "Pick a test below, then tap Run Test.",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		TextWrapped = true,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextYAlignment = Enum.TextYAlignment.Top,
@@ -7948,7 +8042,7 @@ local function buildGui()
 	local timelineFrame = newInstance("Frame", {
 		Position = UDim2.fromOffset(14, 132),
 		Size = UDim2.new(1, -28, 0, 28),
-		BackgroundColor3 = COLORS.off,
+		BackgroundColor3 = UI_COLORS.off,
 		BackgroundTransparency = 0.3,
 		BorderSizePixel = 0,
 	}, resultCard)
@@ -7959,7 +8053,7 @@ local function buildGui()
 		Size = UDim2.new(1, -28, 0, 14),
 		BackgroundTransparency = 1,
 		Text = "top bar: dash   green: in reach   accent: block   tick: M1 or hit",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.Gotham,
 		TextSize = 9,
@@ -7969,7 +8063,7 @@ local function buildGui()
 		Size = UDim2.new(1, -28, 0, 16),
 		BackgroundTransparency = 1,
 		Text = "No runs yet",
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamMedium,
 		TextSize = 11,
@@ -8018,7 +8112,7 @@ local function buildGui()
 	---@param result table
 	local function showResult(result)
 		resultTitle.Text = result.title or "-"
-		resultTitle.TextColor3 = result.ok and COLORS.good or COLORS.bad
+		resultTitle.TextColor3 = result.ok and UI_COLORS.good or UI_COLORS.bad
 
 		local lines = {}
 		for _, line in ipairs(result.lines or {}) do
@@ -8035,9 +8129,9 @@ local function buildGui()
 	local runOnce = newInstance("TextButton", {
 		Position = UDim2.fromOffset(14, 204),
 		Size = UDim2.fromOffset(108, 28),
-		BackgroundColor3 = COLORS.accent,
+		BackgroundColor3 = UI_COLORS.accent,
 		Text = "Run Test",
-		TextColor3 = COLORS.ink,
+		TextColor3 = UI_COLORS.ink,
 		Font = Enum.Font.GothamBold,
 		TextSize = 12,
 		AutoButtonColor = false,
@@ -8058,7 +8152,7 @@ local function buildGui()
 		Size = UDim2.fromOffset(108, 28),
 		BackgroundTransparency = 1,
 		Text = "Run x10",
-		TextColor3 = COLORS.text,
+		TextColor3 = UI_COLORS.text,
 		Font = Enum.Font.GothamMedium,
 		TextSize = 12,
 		AutoButtonColor = false,
@@ -8241,7 +8335,7 @@ local function buildGui()
 		table.clear(learned.m1)
 		table.clear(dashSpeeds)
 	end)
-	addAction(data, "Unload", "Remove Slotted", "Unload", function()
+	addAction(data, "Unload", "Remove Vanta", "Unload", function()
 		Zenny.detach()
 	end)
 
@@ -8272,7 +8366,7 @@ local function buildGui()
 		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundTransparency = 1,
 		Text = "",
-		TextColor3 = COLORS.dim,
+		TextColor3 = UI_COLORS.dim,
 		TextWrapped = true,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextYAlignment = Enum.TextYAlignment.Top,
@@ -8376,12 +8470,12 @@ local function buildGui()
 
 		for _, tile in ipairs(tiles) do
 			local on = Settings[tile.key]
-			tween(tile.tile, { BackgroundColor3 = on and COLORS.accentDark or COLORS.off, BackgroundTransparency = on and 0.35 or 0.45 }, QUICK)
+			tween(tile.tile, { BackgroundColor3 = on and UI_COLORS.accentDark or UI_COLORS.off, BackgroundTransparency = on and 0.35 or 0.45 }, QUICK)
 			tween(tile.stroke, { Transparency = on and 0.1 or 0.85 }, QUICK)
 		end
 
 		local remoteFound = getRemote() ~= nil
-		statusDot.BackgroundColor3 = remoteFound and COLORS.accent or COLORS.bad
+		statusDot.BackgroundColor3 = remoteFound and UI_COLORS.accent or UI_COLORS.bad
 		statusText.Text = remoteFound and "All Systems Operational" or "Input remote missing"
 		statusDetail.Text = string.format("Ping %d ms\nLearned %d moves", getPing(), countLearned("barrage") + countLearned("shove") + countLearned("uppercut"))
 
@@ -8428,11 +8522,11 @@ local function buildGui()
 		end
 
 		closeArmed = true
-		closeButton.TextColor3 = COLORS.bad
+		closeButton.TextColor3 = UI_COLORS.bad
 		task.delay(2, function()
 			closeArmed = false
 			if closeButton.Parent then
-				closeButton.TextColor3 = COLORS.dim
+				closeButton.TextColor3 = UI_COLORS.dim
 			end
 		end)
 	end)
@@ -8441,15 +8535,15 @@ local function buildGui()
 	local opener = newInstance("TextButton", {
 		Position = UDim2.fromOffset(12, math.floor(viewport.Y / 2) - 20),
 		Size = UDim2.fromOffset(44, 44),
-		BackgroundColor3 = COLORS.accent,
-		Text = "Z",
-		TextColor3 = COLORS.ink,
+		BackgroundColor3 = UI_COLORS.accent,
+		Text = "V",
+		TextColor3 = UI_COLORS.ink,
 		Font = Enum.Font.GothamBlack,
 		TextSize = 20,
 		AutoButtonColor = false,
 	}, gui)
 	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, opener)
-	newInstance("UIStroke", { Color = COLORS.accent, Transparency = 0.5, Thickness = 3 }, opener)
+	newInstance("UIStroke", { Color = UI_COLORS.accent, Transparency = 0.5, Thickness = 3 }, opener)
 	addPress(opener)
 	connect(opener.MouseButton1Click, function()
 		setWindowOpen(not windowOpen)
@@ -8487,7 +8581,7 @@ local function buildGui()
 
 	-- Quick toggle pills for fast changes mid-fight.
 	local quick = newInstance("Frame", {
-		Position = UDim2.fromOffset(12, math.floor(viewport.Y / 2) + 34),
+		Position = UDim2.fromOffset(math.max(viewport.X - 108, 4), math.floor(viewport.Y / 2) + 34),
 		Size = UDim2.fromOffset(96, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundTransparency = 1,
@@ -8498,17 +8592,17 @@ local function buildGui()
 	for index, info in ipairs({ { "Block", "autoBlock" }, { "Evasive", "autoEvasive" }, { "Catch", "catchEnabled" }, { "Lock", "catchFace" } }) do
 		local pill = newInstance("TextButton", {
 			Size = UDim2.fromOffset(96, 30),
-			BackgroundColor3 = COLORS.off,
+			BackgroundColor3 = UI_COLORS.off,
 			BackgroundTransparency = 0.3,
 			Text = info[1],
-			TextColor3 = COLORS.dim,
+			TextColor3 = UI_COLORS.dim,
 			Font = Enum.Font.GothamMedium,
 			TextSize = 13,
 			AutoButtonColor = false,
 			LayoutOrder = index,
 		}, quick)
 		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, pill)
-		local stroke = newInstance("UIStroke", { Color = COLORS.accent, Transparency = 0.7, Thickness = 1 }, pill)
+		local stroke = newInstance("UIStroke", { Color = UI_COLORS.accent, Transparency = 0.7, Thickness = 1 }, pill)
 		addPress(pill)
 		quickEntries[index] = { pill = pill, stroke = stroke, key = info[2] }
 
@@ -8537,9 +8631,9 @@ local function buildGui()
 			if entry.shown ~= on then
 				entry.shown = on
 				tween(entry.pill, {
-					BackgroundColor3 = on and COLORS.accent or COLORS.off,
+					BackgroundColor3 = on and UI_COLORS.accent or UI_COLORS.off,
 					BackgroundTransparency = on and 0.1 or 0.3,
-					TextColor3 = on and COLORS.ink or COLORS.dim,
+					TextColor3 = on and UI_COLORS.ink or UI_COLORS.dim,
 				})
 				tween(entry.stroke, { Transparency = on and 0.2 or 0.7 })
 			end
@@ -8548,11 +8642,11 @@ local function buildGui()
 
 	-- Active feature list on the left.
 	local indicatorLabel = newInstance("TextLabel", {
-		Position = UDim2.fromOffset(14, 96),
+		Position = UDim2.fromOffset(14, math.max(viewport.Y - 132, 12)),
 		Size = UDim2.fromOffset(190, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundTransparency = 1,
-		TextColor3 = COLORS.accent,
+		TextColor3 = UI_COLORS.accent,
 		TextStrokeTransparency = 0.5,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextYAlignment = Enum.TextYAlignment.Top,
@@ -8621,7 +8715,7 @@ function Zenny.init()
 	connect(workspace.DescendantAdded, onDescendantAdded)
 	connect(playersService.PlayerRemoving, removeEsp)
 
-	log("Slotted loaded; input remote " .. (getRemote() and "found" or "missing"))
+	log("Vanta loaded; input remote " .. (getRemote() and "found" or "missing"))
 end
 
 ---Tear everything down and restore touched state.
@@ -8692,7 +8786,7 @@ end
 
 ---@param error string
 local function onInitializeError(error)
-	warn("Slotted failed to initialize.")
+	warn("Vanta failed to initialize.")
 	warn(error)
 	warn(debug.traceback())
 	Zenny.detach()
