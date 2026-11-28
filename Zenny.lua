@@ -109,6 +109,7 @@ local Bot = {
 	anticipateAt = 0,
 	dashMemory = setmetatable({}, { __mode = "k" }),
 	swings = setmetatable({}, { __mode = "k" }),
+	backs = setmetatable({}, { __mode = "k" }),
 	oppAt = 0,
 	lastTick = 0,
 	lastHealth = 0,
@@ -1605,18 +1606,30 @@ local function onDashTrack(ctx)
 		return
 	end
 
-	-- Only a back dash right after their M1 counts: that is a backdash cancel.
+	-- A backdash cancel is a move followed right away by a back dash. The move
+	-- can register on either side of the dash animation, so check both orders.
 	local cancel = false
 	local cancelFrom = nil
 	if kind == "BACK" then
+		local now = os.clock()
 		local swing = Bot.swings[ctx.root]
-		cancel = swing ~= nil and os.clock() - swing.at <= math.min(swing.length, 3) + Settings.bdcWindow
-		cancelFrom = swing and swing.kind
-		cancel = cancel or (labRun ~= nil and ctx.character == labDummy)
+		if swing and now - swing.at <= math.min(swing.length, 3) + Settings.bdcWindow then
+			cancel = true
+			cancelFrom = swing.kind
+		end
+
+		if labRun ~= nil and ctx.character == labDummy then
+			cancel = true
+		end
+
 		if not cancel then
+			-- Their move may still be about to play: wait for it.
+			ctx.seenAt = ctx.seenAt or now
+			Bot.backs[ctx.root] = ctx
 			return
 		end
 
+		Bot.backs[ctx.root] = nil
 		Zenny.timeLog(string.format("backdash cancel from %s, d=%d", cancelFrom or "lab", ctx.distance))
 	end
 
@@ -1624,7 +1637,7 @@ local function onDashTrack(ctx)
 		root = ctx.root,
 		kind = kind,
 		range = range,
-		startedAt = os.clock(),
+		startedAt = ctx.seenAt or os.clock(),
 		t0 = ctx.t0,
 		fired = false,
 		bdc = cancel,
@@ -2039,6 +2052,18 @@ local function onThreatTrack(ctx)
 	local isM1 = ctx.kind == "ATTACK" and ((ctx.id and learned.m1[ctx.id]) or ctx.track.Length <= M1_MAX_LENGTH)
 	if isM1 or ctx.kind == "SHOVE" or ctx.kind == "BARRAGE" then
 		Bot.swings[ctx.root] = { at = now, length = ctx.track.Length, kind = ctx.kind }
+	end
+
+	-- Back dash first, move right after: still a backdash cancel.
+	local pending = Bot.backs[ctx.root]
+	if pending and (isM1 or ctx.kind == "SHOVE" or ctx.kind == "BARRAGE") then
+		Bot.backs[ctx.root] = nil
+		local _, myRoot = getMe()
+		if myRoot and pending.root.Parent and pending.track.IsPlaying and now - pending.seenAt <= Settings.bdcWindow then
+			pending.offset = myRoot.Position - pending.root.Position
+			pending.distance = pending.offset.Magnitude
+			onDashTrack(pending)
+		end
 	end
 
 	-- Hit reactions look like attacks, so skip enemies that were just hit,
