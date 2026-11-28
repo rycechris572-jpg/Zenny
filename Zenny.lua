@@ -20,17 +20,17 @@ local coreGuiService = game:GetService("CoreGui")
 local BLOCK_KEY = Enum.KeyCode.F
 local TOGGLE_KEY = Enum.KeyCode.RightShift
 local COLORS = {
-	card = Color3.fromRGB(12, 22, 16),
-	accent = Color3.fromRGB(64, 255, 112),
-	accentDark = Color3.fromRGB(24, 150, 70),
-	text = Color3.fromRGB(240, 250, 243),
-	dim = Color3.fromRGB(150, 172, 158),
-	off = Color3.fromRGB(30, 44, 36),
-	good = Color3.fromRGB(120, 255, 190),
-	now = Color3.fromRGB(255, 240, 130),
-	bad = Color3.fromRGB(255, 110, 130),
-	warn = Color3.fromRGB(255, 200, 110),
-	ink = Color3.fromRGB(5, 14, 8),
+	card = Color3.fromRGB(13, 13, 15),
+	accent = Color3.fromRGB(245, 245, 248),
+	accentDark = Color3.fromRGB(145, 145, 152),
+	text = Color3.fromRGB(248, 248, 250),
+	dim = Color3.fromRGB(155, 155, 164),
+	off = Color3.fromRGB(28, 28, 32),
+	good = Color3.fromRGB(235, 235, 240),
+	now = Color3.fromRGB(205, 205, 212),
+	bad = Color3.fromRGB(175, 175, 182),
+	warn = Color3.fromRGB(220, 220, 226),
+	ink = Color3.fromRGB(8, 8, 10),
 }
 local DASH_TYPES = {
 	["10480793962"] = "RIGHT",
@@ -5657,8 +5657,8 @@ end
 ---@param thickness number?
 local function outline(parent, transparency, thickness)
 	return newInstance("UIStroke", {
-		Color = COLORS.accent,
-		Transparency = transparency,
+		Color = Color3.fromRGB(242, 242, 248),
+		Transparency = math.min(transparency, 0.35),
 		Thickness = thickness or 1,
 		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
 	}, parent)
@@ -6065,7 +6065,7 @@ local INDICATOR_LIST = {
 
 ---Build the window, pages, quick pills and indicators.
 local function buildGui()
-	gui = newInstance("ScreenGui", { Name = "Zenny", ResetOnSpawn = false, DisplayOrder = 50 }, nil)
+	gui = newInstance("ScreenGui", { Name = "Slotted", ResetOnSpawn = false, DisplayOrder = 50 }, nil)
 
 	local parented = pcall(function()
 		gui.Parent = (gethui and gethui()) or coreGuiService
@@ -6074,7 +6074,7 @@ local function buildGui()
 		gui.Parent = playerGui
 	end
 
-	holder = newInstance("Folder", { Name = "ZennyObjects" }, gui)
+	holder = newInstance("Folder", { Name = "SlottedObjects" }, gui)
 
 	local loadedAt = os.clock()
 	local camera = workspace.CurrentCamera
@@ -6097,9 +6097,9 @@ local function buildGui()
 	newInstance("UIGradient", {
 		Rotation = 135,
 		Color = ColorSequence.new({
-			ColorSequenceKeypoint.new(0, Color3.fromRGB(6, 18, 10)),
-			ColorSequenceKeypoint.new(0.55, Color3.fromRGB(3, 8, 5)),
-			ColorSequenceKeypoint.new(1, Color3.fromRGB(8, 26, 14)),
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(15, 15, 18)),
+			ColorSequenceKeypoint.new(0.55, Color3.fromRGB(5, 5, 7)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(19, 19, 23)),
 		}),
 	}, window)
 
@@ -6115,11 +6115,57 @@ local function buildGui()
 	}, edge)
 	local windowScale = newInstance("UIScale", { Scale = 0.94 }, window)
 
+	-- Subtle monochrome particle field behind the interface.
+	window.ClipsDescendants = true
+	local particleLayer = newInstance("Frame", {
+		Name = "AmbientParticles",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ZIndex = 0,
+	}, window)
+	local particles = {}
+	for index = 1, 30 do
+		local diameter = math.random(2, 4)
+		local dot = newInstance("Frame", {
+			Name = "Particle",
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(math.random(), math.random()),
+			Size = UDim2.fromOffset(diameter, diameter),
+			BackgroundColor3 = Color3.fromRGB(235, 235, 242),
+			BackgroundTransparency = math.random(48, 78) / 100,
+			BorderSizePixel = 0,
+			ZIndex = 0,
+		}, particleLayer)
+		corner(dot, diameter)
+		particles[index] = {
+			object = dot,
+			x = math.random(),
+			y = math.random(),
+			speed = 0.006 + math.random() * 0.012,
+			drift = (math.random() - 0.5) * 0.012,
+			phase = math.random() * math.pi * 2,
+		}
+	end
+	local particleClock = 0
+	connect(runService.Heartbeat, function(dt)
+		particleClock += dt
+		for _, particle in ipairs(particles) do
+			particle.y -= particle.speed * dt
+			particle.x += math.sin(particleClock * 0.45 + particle.phase) * particle.drift * dt
+			if particle.y < -0.03 then
+				particle.y = 1.03
+				particle.x = math.random()
+			end
+			particle.object.Position = UDim2.fromScale(math.clamp(particle.x, 0, 1), particle.y)
+		end
+	end)
+
 	-- Sidebar with logo, navigation and the build card.
 	local sidebar = newInstance("Frame", {
 		Position = UDim2.fromOffset(10, 10),
 		Size = UDim2.new(0, 132, 1, -20),
-		BackgroundColor3 = Color3.fromRGB(5, 12, 8),
+		BackgroundColor3 = Color3.fromRGB(9, 9, 12),
 		BackgroundTransparency = 0.2,
 		BorderSizePixel = 0,
 	}, window)
@@ -6146,7 +6192,7 @@ local function buildGui()
 	newInstance("TextLabel", {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundTransparency = 1,
-		Text = "Z",
+		Text = "S",
 		TextColor3 = COLORS.ink,
 		Font = Enum.Font.GothamBlack,
 		TextSize = 18,
@@ -6155,11 +6201,11 @@ local function buildGui()
 		Position = UDim2.fromOffset(50, 0),
 		Size = UDim2.new(1, -56, 1, 0),
 		BackgroundTransparency = 1,
-		Text = "Zenny",
+		Text = "Slotted",
 		TextColor3 = COLORS.text,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBold,
-		TextSize = 19,
+		TextSize = 16,
 	}, logoRow)
 
 	local showCard = height >= 340
@@ -6191,7 +6237,7 @@ local function buildGui()
 			Position = UDim2.fromOffset(10, 8),
 			Size = UDim2.new(1, -20, 0, 18),
 			BackgroundTransparency = 1,
-			Text = "👑 Zenny v1.5",
+			Text = "SLOTTED  /  V2",
 			TextColor3 = COLORS.warn,
 			TextXAlignment = Enum.TextXAlignment.Left,
 			Font = Enum.Font.GothamBold,
@@ -6482,7 +6528,7 @@ local function buildGui()
 		Position = UDim2.fromOffset(20, 30),
 		Size = UDim2.fromOffset(240, 46),
 		BackgroundTransparency = 1,
-		Text = "Zenny",
+		Text = "Slotted",
 		TextColor3 = Color3.new(1, 1, 1),
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Enum.Font.GothamBlack,
@@ -6574,7 +6620,7 @@ local function buildGui()
 	local bigZ = newInstance("TextLabel", {
 		Size = UDim2.fromScale(1, 1),
 		BackgroundTransparency = 1,
-		Text = "Z",
+		Text = "S",
 		TextColor3 = Color3.new(1, 1, 1),
 		Font = Enum.Font.GothamBlack,
 		TextSize = 78,
@@ -7592,7 +7638,7 @@ local function buildGui()
 		table.clear(learned.m1)
 		table.clear(dashSpeeds)
 	end)
-	addAction(data, "Unload", "Remove Zenny", "Unload", function()
+	addAction(data, "Unload", "Remove Slotted", "Unload", function()
 		Zenny.detach()
 	end)
 
@@ -7793,7 +7839,7 @@ local function buildGui()
 		Position = UDim2.fromOffset(12, math.floor(viewport.Y / 2) - 20),
 		Size = UDim2.fromOffset(44, 44),
 		BackgroundColor3 = COLORS.accent,
-		Text = "Z",
+		Text = "S",
 		TextColor3 = COLORS.ink,
 		Font = Enum.Font.GothamBlack,
 		TextSize = 20,
