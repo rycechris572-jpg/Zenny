@@ -245,7 +245,6 @@ local moveData = shared.ZennyMoves or {}
 shared.ZennyMoves = moveData
 local remoteCache = nil
 local heldBlocks = 0
-local blockLockedUntil = 0
 local blockHoldUntil = 0
 local blockUntil = 0
 local pingAverage = nil
@@ -265,7 +264,6 @@ local alignOrientation = nil
 local alignAttachment = nil
 local techBusy = false
 local learning = nil
-local learningUntil = 0
 local labRun = nil
 local labDummy = nil
 local boundHumanoid = nil
@@ -552,7 +550,7 @@ end
 
 ---Get the ping used for timing; the lab can simulate a different one.
 ---@return number
-local function effectivePing()
+function Zenny.effectivePing()
 	if labRun then
 		return Settings.labPing
 	end
@@ -562,7 +560,7 @@ end
 
 ---Sample ping and frame time so timing uses a smoothed value plus jitter.
 ---@param delta number
-local function updateLag(delta)
+function Zenny.updateLag(delta)
 	frameTime = frameTime * 0.9 + math.clamp(delta, 0.002, 0.1) * 0.1
 
 	local now = os.clock()
@@ -961,7 +959,7 @@ local function pressBlock(duration)
 end
 
 ---Press or release the block key so it matches what has been requested.
-local function updateBlockController()
+function Zenny.updateBlockController()
 	local now = os.clock()
 	local want = now < blockUntil or heldBlocks > 0
 	if heldBlocks > 0 then
@@ -1001,7 +999,7 @@ end
 
 ---Hold block and dash away to dodge a move.
 ---@return boolean
-local function pressEvasive()
+function Zenny.pressEvasive()
 	local now = os.clock()
 	if now < evasiveLockedUntil or not Zenny.roll(Settings.evasiveChance) then
 		return false
@@ -1039,7 +1037,7 @@ local function isRagdolled(character, humanoid)
 end
 
 ---Spam dash while ragdolled so the ragdoll gets cancelled.
-local function updateEvasive()
+function Zenny.updateEvasive()
 	local character, _, humanoid = getMe()
 	local active = Settings.autoEvasive and Settings.evasiveMode ~= "Consec"
 	if not active or not character or not humanoid or humanoid.Health <= 0 or not isRagdolled(character, humanoid) then
@@ -1170,7 +1168,7 @@ end
 ---Get the orientation constraint, creating it if needed.
 ---@param myRoot BasePart
 ---@return AlignOrientation
-local function getAlign(myRoot)
+function Zenny.getAlign(myRoot)
 	if alignOrientation and alignOrientation.Parent == myRoot and alignAttachment and alignAttachment.Parent == myRoot then
 		return alignOrientation
 	end
@@ -1257,11 +1255,11 @@ local function updateLock(myRoot, snap)
 	end
 
 	-- A constraint turns us without rewriting position, so walking still works.
-	getAlign(myRoot).CFrame = goal
+	Zenny.getAlign(myRoot).CFrame = goal
 end
 
 ---Keep the character lock tracking its target every frame.
-local function updateLockFrame()
+function Zenny.updateLockFrame()
 	local _, myRoot = getMe()
 	if not myRoot then
 		return stopLock()
@@ -1294,7 +1292,7 @@ end
 ---Build the timing rings, line and card for a tracked dash.
 ---@param entry table
 ---@param myRoot BasePart
-local function createVisual(entry, myRoot)
+function Zenny.createVisual(entry, myRoot)
 	local flat = CFrame.new(0, -2.9, 0) * CFrame.Angles(math.rad(90), 0, 0)
 
 	local target = newInstance("CylinderHandleAdornment", {
@@ -1395,7 +1393,7 @@ end
 ---@param entry table
 ---@param remaining number
 ---@param myRoot BasePart
-local function updateVisual(entry, remaining, myRoot)
+function Zenny.updateVisual(entry, remaining, myRoot)
 	local visual = entry.visual
 	local alpha = math.clamp(remaining / math.max(entry.delay or 0.2, 0.01), 0, 1)
 	local counter = entry.countering
@@ -1539,7 +1537,7 @@ end
 ---Release held blocks and M1 when a front dash ends close to us.
 ---@param entry table
 ---@param silent boolean?
-local function onDashEnded(entry, silent)
+function Zenny.onDashEnded(entry, silent)
 	if entry.holding then
 		entry.holding = false
 
@@ -1583,7 +1581,7 @@ local function untrackDash(track, silent)
 			dashSpeeds[entry.kind] = previous and (previous * 0.7 + peak * 0.3) or peak
 		end
 
-		onDashEnded(entry, silent)
+		Zenny.onDashEnded(entry, silent)
 	end
 	dashes[track] = nil
 end
@@ -1694,7 +1692,7 @@ local function onDashTrack(ctx)
 end
 
 ---Run the dash timing, visuals and auto M1 every frame.
-local function updateDashes()
+function Zenny.updateDashes()
 	local _, myRoot = getMe()
 	if not myRoot then
 		for track in pairs(dashes) do
@@ -1887,9 +1885,9 @@ local function updateDashes()
 
 		if Settings.catchVisual then
 			if not entry.visual then
-				createVisual(entry, myRoot)
+				Zenny.createVisual(entry, myRoot)
 			end
-			updateVisual(entry, remaining, myRoot)
+			Zenny.updateVisual(entry, remaining, myRoot)
 		else
 			destroyVisual(entry)
 		end
@@ -1913,7 +1911,7 @@ end
 ---@param id string
 ---@param hitTime number
 ---@param pierced boolean
-local function learnMove(id, hitTime, pierced)
+function Zenny.learnMove(id, hitTime, pierced)
 	local data = moveData[id]
 	if not data then
 		data = { hits = 0, pierce = 0 }
@@ -1954,13 +1952,13 @@ local function onHealthChanged(health)
 		return
 	end
 
-	learnMove(bestEntry.id, elapsed, os.clock() < blockHoldUntil)
+	Zenny.learnMove(bestEntry.id, elapsed, os.clock() < blockHoldUntil)
 	bestEntry.hitUs = true
 end
 
 ---Follow the current character's humanoid for damage learning.
 ---@param humanoid Humanoid
-local function bindHealth(humanoid)
+function Zenny.bindHealth(humanoid)
 	if humanoid == boundHumanoid then
 		return
 	end
@@ -1975,7 +1973,7 @@ end
 ---@param entry table
 ---@param elapsed number
 ---@return number?
-local function punishRemaining(track, entry, elapsed)
+function Zenny.punishRemaining(track, entry, elapsed)
 	local length = entry.length or 0
 	if track.Looped or length <= 0 or track.Speed <= 0.01 then
 		return nil
@@ -1988,7 +1986,7 @@ end
 ---Check whether a punish M1 may go out against this enemy right now.
 ---@param entry table
 ---@return boolean
-local function canPunish(entry)
+function Zenny.canPunish(entry)
 	if entry.hitUs or not entry.root.Parent then
 		return false
 	end
@@ -2016,7 +2014,7 @@ local function firePunish(entry, why)
 	entry.punishFired = true
 
 	local now = os.clock()
-	if now < punishLockedUntil or not canPunish(entry) then
+	if now < punishLockedUntil or not Zenny.canPunish(entry) then
 		log(string.format("punish skipped (%s)", why))
 		return
 	end
@@ -2044,7 +2042,7 @@ end
 
 ---Register an enemy attack animation and start any move-specific reaction.
 ---@param ctx table
-local function onThreatTrack(ctx)
+function Zenny.onThreatTrack(ctx)
 	local humanoid = ctx.humanoid
 	local now = os.clock()
 
@@ -2203,14 +2201,14 @@ function Zenny.canThreaten(root, kind, strict)
 end
 
 ---Block or evade due attacks and release finished holds.
-local function updateThreats()
+function Zenny.updateThreats()
 	local _, _, myHumanoid = getMe()
 	if myHumanoid then
-		bindHealth(myHumanoid)
+		Zenny.bindHealth(myHumanoid)
 	end
 
 	-- Lead the reaction by our setting plus half the ping.
-	local lead = Settings.blockLead + effectivePing() / 2000
+	local lead = Settings.blockLead + Zenny.effectivePing() / 2000
 
 	for track, entry in pairs(moves) do
 		local elapsed = os.clock() - entry.startedAt + entry.t0
@@ -2256,7 +2254,7 @@ local function updateThreats()
 
 		-- Send the punish early enough that it arrives as the swing ends.
 		if entry.punish and not entry.punishFired and elapsed > 0.15 then
-			local remaining = punishRemaining(track, entry, elapsed)
+			local remaining = Zenny.punishRemaining(track, entry, elapsed)
 			if remaining and remaining <= getLead() + Settings.punishOffset - (entry.punishSlop or 0) then
 				firePunish(entry, "timed")
 			end
@@ -2300,7 +2298,7 @@ local function updateThreats()
 				-- Consec moves get dodged when evasive covers them.
 				local evaded = false
 				if Settings.autoEvasive and Settings.evasiveMode ~= "Ragdoll" and entry.kind == "BARRAGE" then
-					evaded = pressEvasive()
+					evaded = Zenny.pressEvasive()
 				end
 
 				if not evaded and Settings.autoBlock and not entry.rolled then
@@ -2354,7 +2352,7 @@ end
 
 ---Turn the camera to a yaw while keeping its pitch.
 ---@param yaw number
-local function setCameraYaw(yaw)
+function Zenny.setCameraYaw(yaw)
 	local camera = workspace.CurrentCamera
 	if not camera then
 		return
@@ -2391,7 +2389,7 @@ local function runTech(myRoot, targetRoot)
 		local yaw = math.atan2(-direction.X, -direction.Z) + math.rad(angle)
 		myRoot.CFrame = CFrame.new(myRoot.Position) * CFrame.Angles(0, yaw, 0)
 		if Settings.techCamera then
-			setCameraYaw(yaw)
+			Zenny.setCameraYaw(yaw)
 		end
 	end
 
@@ -2451,7 +2449,7 @@ end
 
 ---Start the tech dash after our own uppercut.
 ---@param myRoot BasePart
-local function triggerTech(myRoot)
+function Zenny.triggerTech(myRoot)
 	local targetRoot = getNearestTarget(myRoot, Settings.techRange)
 	if not targetRoot then
 		log("tech: no target in range")
@@ -2532,13 +2530,13 @@ local function onOwnTrack(track, fromEvent)
 	if Settings.techLoop and not techBusy and isUppercut then
 		local _, myRoot = getMe()
 		if myRoot then
-			triggerTech(myRoot)
+			Zenny.triggerTech(myRoot)
 		end
 	end
 end
 
 ---Hook and poll our own animator.
-local function scanOwn()
+function Zenny.scanOwn()
 	local _, _, humanoid = getMe()
 	local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
 	if not animator then
@@ -2561,7 +2559,7 @@ end
 ---@param track AnimationTrack
 ---@param id string?
 ---@return string?
-local function classify(track, id)
+function Zenny.classify(track, id)
 	if id then
 		if DASH_TYPES[id] then
 			return DASH_TYPES[id]
@@ -2641,7 +2639,7 @@ local function onEnemyTrack(character, track, fromEvent)
 	end
 
 	local id = getTrackId(track)
-	local kind = classify(track, id)
+	local kind = Zenny.classify(track, id)
 	if not kind then
 		return
 	end
@@ -2676,13 +2674,13 @@ local function onEnemyTrack(character, track, fromEvent)
 	if kind == "RIGHT" or kind == "LEFT" or kind == "BACK" or kind == "FRONT" then
 		onDashTrack(ctx)
 	else
-		onThreatTrack(ctx)
+		Zenny.onThreatTrack(ctx)
 	end
 end
 
 ---Check whether any feature needs to watch enemy animations.
 ---@return boolean
-local function needsScan()
+function Zenny.needsScan()
 	return labRun ~= nil
 		or Bot.lesson ~= nil
 		or Settings.autoBlock
@@ -2703,9 +2701,9 @@ local function needsScan()
 end
 
 ---Hook and poll every enemy animator in range.
-local function scanEnemies()
+function Zenny.scanEnemies()
 	local myCharacter, myRoot = getMe()
-	if not myRoot or not needsScan() then
+	if not myRoot or not Zenny.needsScan() then
 		return
 	end
 
@@ -2758,7 +2756,7 @@ end
 
 ---Build esp objects for a player's current character.
 ---@param player Player
-local function createEsp(player)
+function Zenny.createEsp(player)
 	removeEsp(player)
 
 	local character = player.Character
@@ -2795,7 +2793,7 @@ local function createEsp(player)
 end
 
 ---Keep esp objects in sync with the player list.
-local function updateEsp()
+function Zenny.updateEsp()
 	if not Settings.esp then
 		for player in pairs(espObjects) do
 			removeEsp(player)
@@ -2810,7 +2808,7 @@ local function updateEsp()
 
 		local entry = espObjects[player]
 		if not entry or entry.character ~= player.Character then
-			createEsp(player)
+			Zenny.createEsp(player)
 			entry = espObjects[player]
 		end
 
@@ -2822,7 +2820,7 @@ local function updateEsp()
 end
 
 ---Keep the self chams highlight in sync with the setting.
-local function updateSelfChams()
+function Zenny.updateSelfChams()
 	local character = localPlayer.Character
 	if not Settings.selfChams or not character then
 		if selfHighlight then
@@ -2849,7 +2847,7 @@ local function updateSelfChams()
 end
 
 ---Pause M1s into counters and punish the endlag when a counter ends.
-local function updateCounterBait()
+function Zenny.updateCounterBait()
 	if not (Settings.counterBait or Settings.counterPunish) then
 		table.clear(counterSeen)
 		return
@@ -2901,7 +2899,7 @@ end
 ---@param humanoid Humanoid
 ---@param now number
 ---@return string?, Color3?
-local function getSafeState(character, root, humanoid, now)
+function Zenny.getSafeState(character, root, humanoid, now)
 	if isCountering(character) then
 		return "COUNTER", COLORS.bad
 	end
@@ -2923,7 +2921,7 @@ end
 
 ---Build a safe-to-hit marker under an enemy.
 ---@param root BasePart
-local function createSafeMarker(root)
+function Zenny.createSafeMarker(root)
 	local billboard = newInstance("BillboardGui", {
 		Adornee = root,
 		Size = UDim2.fromOffset(96, 24),
@@ -2953,7 +2951,7 @@ local function createSafeMarker(root)
 end
 
 ---Show whether it is safe to hit each nearby enemy.
-local function updateSafeIndicator()
+function Zenny.updateSafeIndicator()
 	local character, myRoot = getMe()
 	local seen = {}
 
@@ -2978,12 +2976,12 @@ local function updateSafeIndicator()
 
 			local marker = safeMarkers[enemy]
 			if not marker then
-				marker = createSafeMarker(root)
+				marker = Zenny.createSafeMarker(root)
 				safeMarkers[enemy] = marker
 			end
 			seen[enemy] = true
 
-			local text, color = getSafeState(enemy, root, humanoid, now)
+			local text, color = Zenny.getSafeState(enemy, root, humanoid, now)
 			marker.billboard.Enabled = text ~= nil
 			if text then
 				marker.label.Text = text
@@ -3002,7 +3000,7 @@ local function updateSafeIndicator()
 end
 
 ---Build the combo counter pill.
-local function ensureComboHud()
+function Zenny.ensureComboHud()
 	if comboHud and comboHud.frame.Parent then
 		return comboHud
 	end
@@ -3033,7 +3031,7 @@ local function ensureComboHud()
 end
 
 ---Count our hits and damage on nearby enemies and show them in a pill.
-local function updateComboCounter()
+function Zenny.updateComboCounter()
 	if not Settings.comboCounter then
 		comboHits = 0
 		if comboHud then
@@ -3070,7 +3068,7 @@ local function updateComboCounter()
 		end
 	end
 
-	local hud = ensureComboHud()
+	local hud = Zenny.ensureComboHud()
 
 	if comboHits > 0 and now - comboLastAt > 2 then
 		comboHits, comboDamage = 0, 0
@@ -6361,7 +6359,7 @@ end
 ---Pick the animation id for a dash kind, preferring a learned one.
 ---@param kind string
 ---@return string?
-local function getDashAnimationId(kind)
+function Zenny.getDashAnimationId(kind)
 	if kind == "BACK" and next(learned.back) then
 		return (next(learned.back))
 	end
@@ -6382,7 +6380,7 @@ end
 ---Get the animation ids a block test plays.
 ---@param testName string
 ---@return table
-local function getAttackIds(testName)
+function Zenny.getAttackIds(testName)
 	if testName == "Block: Uppercut" then
 		return { "10503381238" }
 	end
@@ -6408,7 +6406,7 @@ end
 
 ---Copy our character into a script-free practice target.
 ---@return Model?
-local function getLabDummy()
+function Zenny.getLabDummy()
 	if labDummy and labDummy.Parent then
 		return labDummy
 	end
@@ -6484,7 +6482,7 @@ end
 ---@param samples table
 ---@param time number
 ---@return number
-local function distanceAt(samples, time)
+function Zenny.distanceAt(samples, time)
 	local last = math.huge
 	for _, sample in ipairs(samples) do
 		last = sample.distance
@@ -6582,7 +6580,7 @@ end
 ---@param test table
 ---@param distance number
 ---@return table
-local function evaluateDash(run, test, distance)
+function Zenny.evaluateDash(run, test, distance)
 	local ping = Settings.labPing / 1000
 	local startup = Settings.labStartup
 	local reach = Settings.labReach
@@ -6631,7 +6629,7 @@ local function evaluateDash(run, test, distance)
 	end
 
 	local landing = m1Event.t + ping + startup
-	local landed = distanceAt(run.samples, landing)
+	local landed = Zenny.distanceAt(run.samples, landing)
 	result.ok = landed <= reach
 	result.title = result.ok and "HIT" or "WHIFF"
 	table.insert(timeline.ticks, { at = landing, color = result.ok and COLORS.good or COLORS.bad })
@@ -6647,7 +6645,7 @@ end
 ---Score a front dash block test.
 ---@param run table
 ---@return table
-local function evaluateFront(run)
+function Zenny.evaluateFront(run)
 	local ping = Settings.labPing / 1000
 	local hitTime = LAB_DASH_TIME + LAB_FRONT_LAG
 	local intervals = buildIntervals(run.events, 1)
@@ -6685,7 +6683,7 @@ end
 ---Score the side dash block test: a hit lands shortly after they arrive.
 ---@param run table
 ---@return table
-local function evaluateSideBlock(run)
+function Zenny.evaluateSideBlock(run)
 	local ping = Settings.labPing / 1000
 	local arrival
 	for _, sample in ipairs(run.samples) do
@@ -6738,7 +6736,7 @@ end
 ---@param run table
 ---@param hits table
 ---@return table
-local function evaluateBlock(run, hits)
+function Zenny.evaluateBlock(run, hits)
 	local ping = Settings.labPing / 1000
 	local total = hits[#hits] + 0.6
 	local intervals = buildIntervals(run.events, total)
@@ -6792,14 +6790,14 @@ end
 ---@param testName string
 ---@param distance number
 ---@return table
-local function runLabOnce(testName, distance)
+function Zenny.runLabOnce(testName, distance)
 	local test = LAB_TESTS[testName]
 	local _, myRoot = getMe()
 	if not myRoot then
 		return { ok = false, title = "NO CHARACTER", lines = { "Spawn in first." } }
 	end
 
-	local dummy = getLabDummy()
+	local dummy = Zenny.getLabDummy()
 	if not dummy then
 		return { ok = false, title = "CLONE FAILED", lines = { "Could not copy your character." } }
 	end
@@ -6838,7 +6836,7 @@ local function runLabOnce(testName, distance)
 	place()
 
 	if test.type == "dash" then
-		local id = getDashAnimationId(test.kind)
+		local id = Zenny.getDashAnimationId(test.kind)
 		if not id then
 			return { ok = false, title = "NO ANIMATION", lines = { "No animation id known for this dash. Learn it first." } }
 		end
@@ -6873,18 +6871,18 @@ local function runLabOnce(testName, distance)
 		track:Stop(0.1)
 
 		if test.block then
-			return evaluateSideBlock(run)
+			return Zenny.evaluateSideBlock(run)
 		end
 
 		if test.kind == "FRONT" then
-			return evaluateFront(run)
+			return Zenny.evaluateFront(run)
 		end
 
-		return evaluateDash(run, test, distance)
+		return Zenny.evaluateDash(run, test, distance)
 	end
 
 	-- Block tests: play one attack, or a string of attacks.
-	local ids = getAttackIds(testName)
+	local ids = Zenny.getAttackIds(testName)
 	if #ids == 0 then
 		return { ok = false, title = "NO ANIMATION", lines = { "No animation known for this move. Use its Learn button first." } }
 	end
@@ -6922,7 +6920,7 @@ local function runLabOnce(testName, distance)
 		return { ok = false, title = "NO ANIMATION", lines = { "The animation could not play on the target." } }
 	end
 
-	return evaluateBlock(run, hits)
+	return Zenny.evaluateBlock(run, hits)
 end
 
 ---Show the latest pass rate in the result text.
@@ -6962,7 +6960,7 @@ local function startLab(count)
 					distance = math.clamp(distance + math.random(-2, 2), 3, 25)
 				end
 
-				last = runLabOnce(testName, distance)
+				last = Zenny.runLabOnce(testName, distance)
 				table.insert(labHistory, last.ok == true)
 				if last.ok then
 					passes += 1
@@ -7451,7 +7449,7 @@ end
 ---Format seconds as a short runtime.
 ---@param seconds number
 ---@return string
-local function formatRuntime(seconds)
+function Zenny.formatRuntime(seconds)
 	seconds = math.floor(seconds)
 	if seconds >= 3600 then
 		return string.format("%dh %02dm", seconds // 3600, (seconds % 3600) // 60)
@@ -7480,7 +7478,7 @@ local INDICATOR_LIST = {
 }
 
 ---Build the window, pages, quick pills and indicators.
-local function buildGui()
+function Zenny.buildGui()
 	gui = newInstance("ScreenGui", { Name = "Slotted", ResetOnSpawn = false, DisplayOrder = 50 }, nil)
 
 	local parented = pcall(function()
@@ -9141,7 +9139,7 @@ local function buildGui()
 			}, QUICK)
 		end
 
-		runtimeValue.Text = formatRuntime(os.clock() - loadedAt)
+		runtimeValue.Text = Zenny.formatRuntime(os.clock() - loadedAt)
 		for index, bar in ipairs(runtimeBars) do
 			tween(bar, { Size = UDim2.new(1 / #runtimeBars, -2, 0.25 + 0.5 * math.abs(math.sin(os.clock() / 3 + index)), 0) }, SMOOTH)
 		end
@@ -9362,23 +9360,23 @@ end
 
 ---Initialize the script.
 function Zenny.init()
-	buildGui()
+	Zenny.buildGui()
 
 	connect(runService.Heartbeat, function(delta)
-		updateLag(delta)
-		scanOwn()
-		scanEnemies()
-		updateThreats()
-		updateDashes()
-		updateEvasive()
+		Zenny.updateLag(delta)
+		Zenny.scanOwn()
+		Zenny.scanEnemies()
+		Zenny.updateThreats()
+		Zenny.updateDashes()
+		Zenny.updateEvasive()
 		Bot.update()
-		updateBlockController()
-		updateCounterBait()
-		updateLockFrame()
-		updateEsp()
-		updateSelfChams()
-		updateSafeIndicator()
-		updateComboCounter()
+		Zenny.updateBlockController()
+		Zenny.updateCounterBait()
+		Zenny.updateLockFrame()
+		Zenny.updateEsp()
+		Zenny.updateSelfChams()
+		Zenny.updateSafeIndicator()
+		Zenny.updateComboCounter()
 	end)
 
 	Bot.load()
