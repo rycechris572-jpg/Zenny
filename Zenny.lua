@@ -59,6 +59,8 @@ local REACTION_STATES = {
 }
 -- Enemies in these states are skipped, like KittyWare's ignore list.
 local ENEMY_IGNORE = { "DoingEmote", "CancelEmote", "CancelEmote2", "BeingLaunched", "Freeze" }
+-- Animation names of blocks and hit reactions; these are never attacks.
+local DEFENSIVE_WORDS = { "block", "guard", "stun", "react", "hurt", "flinch", "recoil", "ragdoll", "getup", "knock" }
 local COUNTER_NAMES = { "Counter", "HunterCounter", "AtomicCounter" }
 -- Features that can be toggled with a rebindable key.
 local TOGGLE_BINDS = {
@@ -223,6 +225,7 @@ local ownTime = setmetatable({}, { __mode = "k" })
 local watched = setmetatable({}, { __mode = "k" })
 local enemyHealth = setmetatable({}, { __mode = "k" })
 local enemyHurtAt = setmetatable({}, { __mode = "k" })
+local enemyBlockedAt = setmetatable({}, { __mode = "k" })
 local lastMoveEnd = setmetatable({}, { __mode = "k" })
 local counterSeen = setmetatable({}, { __mode = "k" })
 local comboHealth = setmetatable({}, { __mode = "k" })
@@ -2839,7 +2842,8 @@ local function onOwnTrack(track, fromEvent)
 	if expected and fromEvent and id and os.clock() - expected.at < 0.6 then
 		local known = DASH_TYPES[id] or learned.back[id] or learned.front[id] or learned.left[id] or learned.right[id]
 		local priority = track.Priority
-		if not known and not learned.m1[id] and not track.Looped and track.Length > 0.1 and track.Length < 1.5 and priority ~= Enum.AnimationPriority.Core and priority ~= Enum.AnimationPriority.Idle then
+		local recentM1 = os.clock() - math.max(Zenny.lastM1At or 0, Bot.selfLastM1 or 0) < 1
+		if not known and not recentM1 and not learned.m1[id] and not track.Looped and track.Length > 0.1 and track.Length < 1.5 and priority ~= Enum.AnimationPriority.Core and priority ~= Enum.AnimationPriority.Idle then
 			local bucket = ({ FRONT = learned.front, BACK = learned.back, LEFT = learned.left, RIGHT = learned.right })[expected.kind]
 			bucket[id] = true
 			Bot.expectDash = nil
@@ -2902,6 +2906,11 @@ function Zenny.classify(track, id)
 			return DASH_TYPES[id]
 		end
 
+		-- A known M1 is never a dash, even if its id got learned as one.
+		if learned.m1[id] then
+			return "ATTACK"
+		end
+
 		if learned.back[id] then
 			return "BACK"
 		end
@@ -2936,6 +2945,12 @@ function Zenny.classify(track, id)
 	end
 
 	local name = track.Name:lower()
+	for _, word in ipairs(DEFENSIVE_WORDS) do
+		if name:find(word, 1, true) then
+			return nil
+		end
+	end
+
 	if name:find("consecutive", 1, true) or name:find("barrage", 1, true) or name:find("machine gun", 1, true) then
 		return "BARRAGE"
 	end
@@ -2986,6 +3001,11 @@ local function onEnemyTrack(character, track, fromEvent)
 	local id = getTrackId(track)
 	local kind = Zenny.classify(track, id)
 	if not kind then
+		return
+	end
+
+	-- A blocking enemy (their auto block answering our M1) is not attacking us.
+	if kind == "ATTACK" and (isBlocking(character) or os.clock() - (enemyBlockedAt[humanoid] or 0) < 0.25) then
 		return
 	end
 
@@ -3072,6 +3092,10 @@ function Zenny.scanEnemies()
 			enemyHurtAt[humanoid] = now
 		end
 		enemyHealth[humanoid] = humanoid.Health
+
+		if isBlocking(character) then
+			enemyBlockedAt[humanoid] = now
+		end
 
 		if not watched[animator] then
 			watched[animator] = true
@@ -6587,6 +6611,17 @@ function Bot.onKey(input, processed)
 	end
 end
 
+---Drop dash ids that were wrongly learned from M1 animations.
+function Bot.cleanLearned()
+	for _, bucket in ipairs({ learned.back, learned.front, learned.left, learned.right }) do
+		for id in pairs(bucket) do
+			if learned.m1[id] then
+				bucket[id] = nil
+			end
+		end
+	end
+end
+
 ---Reset toggle keybinds that were saved as Unknown, which every screen tap matches.
 function Bot.cleanBinds()
 	for _, bind in ipairs(TOGGLE_BINDS) do
@@ -9774,6 +9809,7 @@ end
 function Zenny.init()
 	Zenny.buildGui()
 	Bot.cleanBinds()
+	Bot.cleanLearned()
 
 	connect(runService.Heartbeat, function(delta)
 		Zenny.updateLag(delta)
