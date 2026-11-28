@@ -60,6 +60,21 @@ local REACTION_STATES = {
 -- Enemies in these states are skipped, like KittyWare's ignore list.
 local ENEMY_IGNORE = { "DoingEmote", "CancelEmote", "CancelEmote2", "BeingLaunched", "Freeze" }
 local COUNTER_NAMES = { "Counter", "HunterCounter", "AtomicCounter" }
+-- Features that can be toggled with a rebindable key.
+local TOGGLE_BINDS = {
+	{ setting = "autoBlock", key = "keyAutoBlock", title = "Auto Block" },
+	{ setting = "consecBlock", key = "keyConsecBlock", title = "Consec Block" },
+	{ setting = "frontBlock", key = "keyFrontBlock", title = "Front Dash Block" },
+	{ setting = "shoveM1", key = "keyShoveM1", title = "Shove M1" },
+	{ setting = "catchEnabled", key = "keySideDashM1", title = "Side Dash M1" },
+	{ setting = "bdcCatch", key = "keyBackdashM1", title = "Backdash Cancel M1" },
+	{ setting = "autoEvasive", key = "keyEvasive", title = "Auto Evasive" },
+	{ setting = "punishBlock", key = "keyPunishBlock", title = "Punish M1" },
+	{ setting = "punishConsec", key = "keyPunishConsec", title = "Punish Consec" },
+	{ setting = "sideBoost", key = "keySideBoost", title = "Side Dash Boost" },
+}
+-- Swings at or under this length count as M1s for Punish Blocked M1.
+local M1_MAX_LENGTH = 1.0
 local FRONT_DASH = { Dash = Enum.KeyCode.W, Key = Enum.KeyCode.Q, Goal = "KeyPress" }
 local EVASIVE_KEYS = { Back = Enum.KeyCode.S, Left = Enum.KeyCode.A, Right = Enum.KeyCode.D }
 local SMOOTH = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
@@ -93,6 +108,7 @@ local Bot = {
 	myHumanoid = nil,
 	anticipateAt = 0,
 	dashMemory = setmetatable({}, { __mode = "k" }),
+	swings = setmetatable({}, { __mode = "k" }),
 	oppAt = 0,
 	lastTick = 0,
 	lastHealth = 0,
@@ -126,6 +142,11 @@ local Bot = {
 	lastM1 = 0,
 	moveVector = Vector3.zero,
 	status = "Off",
+	popups = {},
+	lastAction = nil,
+	cancelCount = 0,
+	cancelAt = 0,
+	boosting = false,
 	myRoot = nil,
 	assistRoot = nil,
 	assistBusy = false,
@@ -156,8 +177,10 @@ local Bot = {
 		counterPunish = true,
 		catchEnabled = true,
 		catchSmart = true,
-		bdcEnabled = true,
+		bdcCatch = true,
 		shoveM1 = true,
+		punishBlock = true,
+		punishConsec = true,
 	},
 }
 
@@ -224,6 +247,12 @@ local heldBlocks = 0
 local blockLockedUntil = 0
 local blockHoldUntil = 0
 local blockUntil = 0
+local pingAverage = nil
+local pingDeviation = 0
+local pingSampledAt = 0
+local frameTime = 1 / 60
+local punishLockedUntil = 0
+local bindCapture = nil
 local blockDown = false
 local nextEvasiveAt = 0
 local ragdollSince = nil
@@ -253,10 +282,20 @@ local originalShadows = lightingService.GlobalShadows
 local Settings = {
 	friendCheck = false,
 	autoBlock = false,
+	blockRate = 100,
+	blockAfterMode = "Auto",
+	blockAfter = 0.06,
+	blockHoldMode = "Auto",
+	frontRate = 100,
+	catchRate = 100,
+	bdcRate = 100,
+	punishRate = 100,
+	shoveRate = 100,
+	evasiveChance = 100,
 	blockFull = true,
 	broadDetect = true,
 	m1Method = "Remote+Mobile",
-	adaptiveBlock = false,
+	adaptiveBlock = true,
 	blockRange = 22,
 	blockHold = 0.35,
 	blockLead = 0.1,
@@ -296,7 +335,29 @@ local Settings = {
 	catchCloseRange = 15,
 	catchCloseDelay = 0,
 	catchFarDelay = 0.3,
-	bdcEnabled = false,
+	catchAccurate = true,
+	lagComp = true,
+	lagMax = 300,
+	lagJitter = 1,
+	punishBlock = false,
+	punishConsec = false,
+	punishRange = 18,
+	punishOffset = 0.03,
+	sideBoost = false,
+	boostLength = 1.65,
+	dashCancelPopup = true,
+	indicatorsAll = true,
+	keyAutoBlock = "None",
+	keyConsecBlock = "None",
+	keyFrontBlock = "None",
+	keyShoveM1 = "None",
+	keySideDashM1 = "None",
+	keyBackdashM1 = "None",
+	keyEvasive = "None",
+	keyPunishBlock = "None",
+	keyPunishConsec = "None",
+	keySideBoost = "None",
+	bdcCatch = false,
 	bdcRange = 25,
 	bdcReach = 12,
 	bdcDelay = 0,
@@ -306,7 +367,10 @@ local Settings = {
 	frontM1Range = 30,
 	frontMaxHold = 0,
 	frontTail = 0.4,
-	counterBait = false,
+	frontLane = 9,
+	frontLead = 0.15,
+	bdcWindow = 0.4,
+	counterBait = true,
 	counterPunish = false,
 	techLoop = false,
 	techRange = 40,
@@ -493,6 +557,139 @@ local function effectivePing()
 	end
 
 	return getPing()
+end
+
+---Sample ping and frame time so timing uses a smoothed value plus jitter.
+---@param delta number
+local function updateLag(delta)
+	frameTime = frameTime * 0.9 + math.clamp(delta, 0.002, 0.1) * 0.1
+
+	local now = os.clock()
+	if now - pingSampledAt < 0.1 then
+		return
+	end
+	pingSampledAt = now
+
+	local ping = getPing()
+	if ping <= 0 then
+		return
+	end
+
+	if not pingAverage then
+		pingAverage = ping
+		return
+	end
+
+	pingDeviation = pingDeviation * 0.9 + math.abs(ping - pingAverage) * 0.1
+	pingAverage = pingAverage * 0.9 + ping * 0.1
+end
+
+---Seconds to send an input early: the round trip (the animation we see is half a
+---ping old and the input needs half a ping to arrive), plus jitter and one frame.
+---@return number
+local function getLead()
+	if labRun then
+		return Settings.labPing / 1000
+	end
+
+	if not Settings.lagComp then
+		return getPing() / 1000
+	end
+
+	local base = pingAverage or getPing()
+	local milliseconds = math.min(base + pingDeviation * Settings.lagJitter, Settings.lagMax)
+	return milliseconds / 1000 + frameTime
+end
+
+---Roll a feature's rate: true when it should react to this trigger.
+---@param rate number 0 to 100
+---@return boolean
+function Zenny.roll(rate)
+	if rate >= 100 then
+		return true
+	end
+
+	return rate > 0 and math.random() * 100 < rate
+end
+
+---Random reaction slop in seconds that grows as a rate drops below 100.
+---@param rate number 0 to 100
+---@param maximum number Slop at 0%.
+---@return number
+function Zenny.slop(rate, maximum)
+	return (1 - math.clamp(rate, 0, 100) / 100) * maximum * math.random()
+end
+
+-- Timings per animation and the timing log survive re-executes.
+Zenny.timings = shared.ZennyTimings or {}
+shared.ZennyTimings = Zenny.timings
+Zenny.timingLog = {}
+
+---Add a line to the timing log.
+---@param text string
+function Zenny.timeLog(text)
+	table.insert(Zenny.timingLog, string.format("%6.2f  %s", os.clock() % 1000, text))
+	if #Zenny.timingLog > 80 then
+		table.remove(Zenny.timingLog, 1)
+	end
+end
+
+---Record a seen enemy animation in the timings table.
+---@param ctx table
+---@return string
+function Zenny.noteTiming(ctx)
+	local key = ctx.id or ("name:" .. ctx.track.Name)
+	local row = Zenny.timings[key]
+	if not row then
+		row = { seen = 0 }
+		Zenny.timings[key] = row
+	end
+
+	row.id = ctx.id
+	row.name = ctx.track.Name
+	row.kind = ctx.kind
+	row.length = ctx.track.Length
+	row.moveKey = ctx.id or "0"
+	row.lastAt = os.clock()
+	row.seen += 1
+
+	Zenny.timeLog(string.format("%s %s len %.2fs d=%d", ctx.kind, ctx.id or ctx.track.Name, ctx.track.Length, ctx.distance))
+	return key
+end
+
+---Text for the animation timings list: length, learned hit frame and our block timing.
+---@return string
+function Zenny.timingText()
+	local rows = {}
+	for _, row in pairs(Zenny.timings) do
+		table.insert(rows, row)
+	end
+
+	table.sort(rows, function(a, b)
+		return (a.lastAt or 0) > (b.lastAt or 0)
+	end)
+
+	local lines = {}
+	for index = 1, math.min(#rows, 30) do
+		local row = rows[index]
+		local data = moveData[row.moveKey]
+		local hit = data and data.hit and string.format("%.2fs x%d", data.hit, data.hits) or "-"
+		local block = row.blockAt and string.format("%.2fs", row.blockAt) or "-"
+		table.insert(lines, string.format("%-7s %-11s len %.2fs hit %s block %s seen %d", row.kind, (row.id or row.name):sub(1, 11), row.length or 0, hit, block, row.seen))
+	end
+
+	return #lines > 0 and table.concat(lines, "\n") or "No animations seen yet"
+end
+
+---Text for the timing logger: the latest lines.
+---@return string
+function Zenny.timingLogText()
+	local log = Zenny.timingLog
+	if #log == 0 then
+		return "Nothing logged yet"
+	end
+
+	return table.concat(log, "\n", math.max(#log - 24, 1), #log)
 end
 
 ---Record an event while a lab test is running.
@@ -805,7 +1002,7 @@ end
 ---@return boolean
 local function pressEvasive()
 	local now = os.clock()
-	if now < evasiveLockedUntil then
+	if now < evasiveLockedUntil or not Zenny.roll(Settings.evasiveChance) then
 		return false
 	end
 
@@ -852,11 +1049,12 @@ local function updateEvasive()
 	local now = os.clock()
 	if not ragdollSince then
 		ragdollSince = now
+		Zenny.ragdollSkip = not Zenny.roll(Settings.evasiveChance)
 		log("ragdolled: spamming dash")
 	end
 
 	-- Stop after a while so a long knockdown does not spam forever.
-	if now - ragdollSince > 4 or now < nextEvasiveAt then
+	if Zenny.ragdollSkip or now - ragdollSince > 4 or now < nextEvasiveAt then
 		return
 	end
 
@@ -1045,7 +1243,7 @@ local function updateLock(myRoot, snap)
 	end
 
 	-- Aim where the target will be once our input reaches the server.
-	local lead = (Settings.catchPing and effectivePing() / 1000 or 0) + 0.03
+	local lead = (Settings.catchPing and getLead() or 0) + 0.03
 	local predicted = lockState.root.Position + lockState.root.AssemblyLinearVelocity * lead
 	local direction = (predicted - myRoot.Position) * Vector3.new(1, 0, 1)
 	if direction.Magnitude < 0.1 then
@@ -1270,6 +1468,73 @@ local function trackEnded(track, elapsed)
 	return elapsed > 6
 end
 
+---Hold block while a front dash is aimed at us and about to arrive, let go if it veers off.
+---@param entry table
+---@param myRoot BasePart
+function Zenny.updateFront(entry, myRoot)
+	local now = os.clock()
+	local offset = (myRoot.Position - entry.root.Position) * Vector3.new(1, 0, 1)
+	local distance = offset.Magnitude
+	local look = entry.root.CFrame.LookVector * Vector3.new(1, 0, 1)
+
+	-- Aimed means we sit inside the lane their dash runs down.
+	local aimed = distance < 6
+	if not aimed and look.Magnitude > 0.1 and distance > 0.1 then
+		local along = look.Unit:Dot(offset)
+		local lateral = math.sqrt(math.max(distance * distance - along * along, 0))
+		aimed = along > 0 and lateral <= Settings.frontLane
+	end
+
+	if aimed then
+		entry.aimedAt = now
+	end
+
+	-- Closing speed over a short window, other players only update a few times a second.
+	local history = entry.history
+	if not history then
+		history = {}
+		entry.history = history
+	end
+
+	table.insert(history, { t = now, distance = distance })
+	while #history > 2 and now - history[1].t > 0.15 do
+		table.remove(history, 1)
+	end
+
+	local closing = 0
+	local oldest = history[1]
+	if oldest and now - oldest.t >= 0.03 then
+		closing = (oldest.distance - distance) / (now - oldest.t)
+	end
+
+	if aimed then
+		entry.peakSpeed = math.max(entry.peakSpeed or 0, closing)
+	end
+
+	-- Seconds until the dash is inside hit range; assume a fast dash until one is measured.
+	local speed = math.max(closing, dashSpeeds.FRONT or 0, 40)
+	local eta = math.max(distance - Settings.predictReach, 0) / speed
+
+	if not entry.holding then
+		if entry.rolled and aimed and eta <= getLead() + Settings.frontLead - entry.slop and holdBlock() then
+			entry.holding = true
+
+			-- Face them so the block covers the hit.
+			if Settings.blockFace then
+				startLock(entry.root, true)
+				updateLock(myRoot, true)
+			end
+
+			log(string.format("front dash: holding block (arrives in %.2fs)", eta))
+			Zenny.timeLog(string.format("front dash block, arrives in %.2fs", eta))
+		end
+	elseif now - (entry.aimedAt or 0) > 0.25 then
+		entry.holding = false
+		releaseBlock()
+		log("front dash: veered off, block released")
+	end
+end
+
 ---Release held blocks and M1 when a front dash ends close to us.
 ---@param entry table
 ---@param silent boolean?
@@ -1284,7 +1549,7 @@ local function onDashEnded(entry, silent)
 		releaseBlock()
 	end
 
-	if silent or entry.kind ~= "FRONT" or not Settings.frontM1 or not entry.root.Parent then
+	if silent or entry.kind ~= "FRONT" or not Settings.frontM1 or not entry.rolled or not entry.root.Parent then
 		return
 	end
 
@@ -1312,7 +1577,7 @@ local function untrackDash(track, silent)
 
 		-- Remember how fast this kind of dash really is.
 		local peak = entry.peakSpeed or 0
-		if not silent and entry.kind ~= "FRONT" and peak > 20 and peak < 200 then
+		if not silent and peak > 20 and peak < 200 then
 			local previous = dashSpeeds[entry.kind]
 			dashSpeeds[entry.kind] = previous and (previous * 0.7 + peak * 0.3) or peak
 		end
@@ -1328,7 +1593,7 @@ local function onDashTrack(ctx)
 	local kind = ctx.kind
 	local enabled, range
 	if kind == "BACK" then
-		enabled, range = Settings.bdcEnabled, Settings.bdcRange
+		enabled, range = Settings.bdcCatch, Settings.bdcRange
 	elseif kind == "FRONT" then
 		enabled, range = Settings.autoBlock and Settings.frontBlock, Settings.frontRange
 	else
@@ -1340,6 +1605,21 @@ local function onDashTrack(ctx)
 		return
 	end
 
+	-- Only a back dash right after their M1 counts: that is a backdash cancel.
+	local cancel = false
+	local cancelFrom = nil
+	if kind == "BACK" then
+		local swing = Bot.swings[ctx.root]
+		cancel = swing ~= nil and os.clock() - swing.at <= math.min(swing.length, 3) + Settings.bdcWindow
+		cancelFrom = swing and swing.kind
+		cancel = cancel or (labRun ~= nil and ctx.character == labDummy)
+		if not cancel then
+			return
+		end
+
+		Zenny.timeLog(string.format("backdash cancel from %s, d=%d", cancelFrom or "lab", ctx.distance))
+	end
+
 	local entry = {
 		root = ctx.root,
 		kind = kind,
@@ -1347,7 +1627,15 @@ local function onDashTrack(ctx)
 		startedAt = os.clock(),
 		t0 = ctx.t0,
 		fired = false,
+		bdc = cancel,
+		bdcFrom = cancelFrom,
 	}
+
+	-- The rate decides how often we react and how late we are when we do.
+	local rate = (kind == "BACK" and Settings.bdcRate) or (kind == "FRONT" and Settings.frontRate) or Settings.catchRate
+	entry.rolled = Zenny.roll(rate)
+	entry.slop = Zenny.slop(rate, 0.1)
+	entry.notBefore = entry.startedAt + entry.slop
 
 	if dashes[ctx.track] then
 		untrackDash(ctx.track, true)
@@ -1362,26 +1650,32 @@ local function onDashTrack(ctx)
 	end
 
 	if kind == "FRONT" then
-		-- Block until the dash ends, if it is heading at us.
-		if ctx.root.CFrame.LookVector:Dot(ctx.offset.Unit) > -0.1 and holdBlock() then
-			entry.holding = true
-			log("front dash: holding block")
+		-- Judge the dash right away, the per frame update keeps watching it.
+		local _, myRoot = getMe()
+		if myRoot then
+			Zenny.updateFront(entry, myRoot)
 		end
 	elseif Settings.catchFace then
 		startLock(ctx.root)
 	end
 
 	-- Already inside reach: M1 now instead of waiting for the next frame.
-	if kind ~= "FRONT" and Settings.catchSmart then
+	if kind ~= "FRONT" and Settings.catchSmart and entry.rolled and entry.slop < 0.02 then
 		local reach = kind == "BACK" and Settings.bdcReach or Settings.catchReach
-		local autoM1 = (kind == "BACK" and Settings.bdcEnabled) or (kind ~= "BACK" and Settings.catchEnabled)
+		local autoM1 = (kind == "BACK" and Settings.bdcCatch) or (kind ~= "BACK" and Settings.catchEnabled)
 		local flat = Vector3.new(ctx.offset.X, 0, ctx.offset.Z).Magnitude
 		local _, myRoot = getMe()
+
+		-- A cancel moves away from us, so judge where they will be when the M1 lands.
+		if kind == "BACK" then
+			flat += (dashSpeeds.BACK or Settings.catchSpeed) * math.clamp(getLead() + Settings.catchOffset, 0, 0.4)
+		end
 
 		if autoM1 and myRoot and flat <= reach + (entry.armed and 2 or 0) and not (Settings.counterBait and isCountering(ctx.character)) then
 			entry.fired = true
 			updateLock(myRoot, true)
 			clickM1(string.format("%s dash d=%d (instant)", kind, flat))
+			Zenny.timeLog(string.format("%s M1 sent instantly, d=%.1f", entry.bdc and "BDC" or kind, flat))
 		end
 	end
 end
@@ -1397,7 +1691,7 @@ local function updateDashes()
 	end
 
 	-- Lead the M1 by half the ping so it lands on time.
-	local lead = Settings.catchPing and (effectivePing() / 2000) or 0
+	local lead = Settings.catchPing and (getLead() / 2) or 0
 	Bot.anticipate(myRoot)
 
 	for track, entry in pairs(dashes) do
@@ -1413,6 +1707,7 @@ local function updateDashes()
 		end
 
 		if entry.kind == "FRONT" then
+			Zenny.updateFront(entry, myRoot)
 			if entry.holding then
 				blockHoldUntil = os.clock() + 0.2
 
@@ -1475,9 +1770,30 @@ local function updateDashes()
 			end
 		end
 
+		-- Dashes run at a constant speed, so trust the measured dash speed over
+		-- replicated positions that only update a few times a second.
+		local knownSpeed = Settings.catchAccurate and dashSpeeds[entry.kind]
+		if knownSpeed and knownSpeed > 10 then
+			local measured = Vector3.new(velocity.X, 0, velocity.Z)
+			local cframe = entry.root.CFrame
+			local facing = (entry.kind == "RIGHT" and cframe.RightVector) or (entry.kind == "LEFT" and -cframe.RightVector) or (entry.kind == "BACK" and -cframe.LookVector) or nil
+			local animDirection = facing and Vector3.new(facing.X, 0, facing.Z)
+
+			local direction = nil
+			if measured.Magnitude > 8 then
+				direction = measured.Unit
+			elseif animDirection and animDirection.Magnitude > 0.1 then
+				direction = animDirection.Unit
+			end
+
+			if direction then
+				velocity = direction * (measured.Magnitude * 0.35 + knownSpeed * 0.65)
+			end
+		end
+
 		-- The animation we see is half a ping old and our M1 takes half a ping to
 		-- arrive, so look a full ping ahead, plus the M1's own startup (the offset).
-		local lookahead = (Settings.catchPing and effectivePing() / 1000 or 0) + Settings.catchOffset + (Settings.dashPredictor and Settings.predictLead or 0)
+		local lookahead = (Settings.catchPing and getLead() or 0) + Settings.catchOffset + (Settings.dashPredictor and Settings.predictLead or 0)
 		local relativeVelocity = (velocity - myRoot.AssemblyLinearVelocity) * Vector3.new(1, 0, 1)
 
 		-- A dash stops, so never predict movement past its end.
@@ -1491,7 +1807,7 @@ local function updateDashes()
 		-- Predictor: walk the whole dash path. M1 if they will be in reach, block if they
 		-- will only get near enough to hit us, and send it a ping early.
 		if Settings.dashPredictor and Settings.dashPredict and sideDash and not entry.predicted and flatDistance <= Settings.predictRange then
-			local canCatch = Settings.catchEnabled and Bot.pathIntercept(flatOffset, relativeVelocity, remainingDash, reach + armBonus)
+			local canCatch = Settings.catchEnabled and entry.rolled and Bot.pathIntercept(flatOffset, relativeVelocity, remainingDash, reach + armBonus)
 			local threat = Bot.pathIntercept(flatOffset, relativeVelocity, remainingDash, Settings.predictReach)
 			if threat and not canCatch and threat <= math.max(lookahead, 0) + 0.15 + (entry.armed and 0.1 or 0) then
 				entry.predicted = true
@@ -1567,7 +1883,7 @@ local function updateDashes()
 
 		-- Smart timing fires as soon as they are, or will be when the M1 lands,
 		-- inside hit reach. A target already inside reach gets hit at once.
-		local autoM1 = (entry.kind == "BACK" and Settings.bdcEnabled) or (entry.kind ~= "BACK" and Settings.catchEnabled)
+		local autoM1 = ((entry.kind == "BACK" and Settings.bdcCatch) or (entry.kind ~= "BACK" and Settings.catchEnabled)) and entry.rolled and os.clock() >= entry.notBefore
 		local timeOk = Settings.catchSmart or remaining <= lead
 		local interceptTime = Settings.dashPredictor and Bot.pathIntercept(flatOffset, relativeVelocity, remainingDash, reach + armBonus) or nil
 		local inReach = flatDistance <= reach or predictedDistance <= reach or (interceptTime ~= nil and interceptTime <= math.max(lookahead, 0))
@@ -1575,6 +1891,7 @@ local function updateDashes()
 			entry.fired = true
 			updateLock(myRoot, true)
 			clickM1(string.format("%s dash d=%d", entry.kind, flatDistance))
+			Zenny.timeLog(string.format("%s M1 sent %.2fs into the dash, d=%.1f", entry.bdc and "BDC" or entry.kind, elapsed, flatDistance))
 		end
 	end
 end
@@ -1595,6 +1912,8 @@ local function learnMove(id, hitTime, pierced)
 	if pierced then
 		data.pierce += 1
 	end
+
+	Zenny.timeLog(string.format("hit by %s at %.2fs %s", id, hitTime, pierced and "(through block)" or "(unblocked)"))
 end
 
 ---Attribute damage we take to the nearest recent move and learn from it.
@@ -1638,11 +1957,89 @@ local function bindHealth(humanoid)
 	connect(humanoid.HealthChanged, onHealthChanged)
 end
 
+---Seconds until a swing's animation ends, or nil when that cannot be predicted.
+---@param track AnimationTrack
+---@param entry table
+---@param elapsed number
+---@return number?
+local function punishRemaining(track, entry, elapsed)
+	local length = entry.length or 0
+	if track.Looped or length <= 0 or track.Speed <= 0.01 then
+		return nil
+	end
+
+	local position = track.IsPlaying and track.TimePosition or elapsed
+	return math.max(length - position, 0) / track.Speed
+end
+
+---Check whether a punish M1 may go out against this enemy right now.
+---@param entry table
+---@return boolean
+local function canPunish(entry)
+	if entry.hitUs or not entry.root.Parent then
+		return false
+	end
+
+	local _, myRoot = getMe()
+	local character = entry.root.Parent
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not myRoot or not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+
+	local flat = ((entry.root.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+	if flat > Settings.punishRange then
+		return false
+	end
+
+	-- An M1 into a counter or a block is wasted.
+	return not isCountering(character) and not isBlocking(character)
+end
+
+---Face the enemy and send the punish M1.
+---@param entry table
+---@param why string
+local function firePunish(entry, why)
+	entry.punishFired = true
+
+	local now = os.clock()
+	if now < punishLockedUntil or not canPunish(entry) then
+		log(string.format("punish skipped (%s)", why))
+		return
+	end
+
+	local _, myRoot = getMe()
+	punishLockedUntil = now + 0.2
+	startLock(entry.root, true)
+	updateLock(myRoot, true)
+	clickM1(string.format("punish %s (%s)", entry.punish, why))
+end
+
+---Mark a move so an M1 goes out when it ends.
+---@param entry table
+---@param kind string
+local function armPunish(entry, kind)
+	if not Zenny.roll(Settings.punishRate) then
+		log("punish skipped: rate roll")
+		return
+	end
+
+	entry.punish = kind
+	entry.punishFired = false
+	entry.punishSlop = Zenny.slop(Settings.punishRate, 0.1)
+end
+
 ---Register an enemy attack animation and start any move-specific reaction.
 ---@param ctx table
 local function onThreatTrack(ctx)
 	local humanoid = ctx.humanoid
 	local now = os.clock()
+
+	-- Remember M1s, shoves and consecs so a back dash right after one reads as a backdash cancel.
+	local isM1 = ctx.kind == "ATTACK" and ((ctx.id and learned.m1[ctx.id]) or ctx.track.Length <= M1_MAX_LENGTH)
+	if isM1 or ctx.kind == "SHOVE" or ctx.kind == "BARRAGE" then
+		Bot.swings[ctx.root] = { at = now, length = ctx.track.Length, kind = ctx.kind }
+	end
 
 	-- Hit reactions look like attacks, so skip enemies that were just hit,
 	-- are ragdolled, or reacting to our own attack.
@@ -1685,7 +2082,18 @@ local function onThreatTrack(ctx)
 		near = ctx.distance <= Settings.blockRange + 6,
 		threat = ctx.distance <= Settings.blockRange and facing and (ctx.kind ~= "SHOVE" or Settings.blockShove),
 		handled = false,
+		timingKey = ctx.timingKey,
+		rolled = Zenny.roll(Settings.blockRate),
+		slop = Zenny.slop(Settings.blockRate, 0.12),
 	}
+	-- A new swing from the same enemy means the window is gone.
+	for otherTrack, other in pairs(moves) do
+		if other.root == ctx.root and other.punish and not other.punishFired and otherTrack ~= ctx.track then
+			other.punishFired = true
+			log("punish cancelled: they swung again")
+		end
+	end
+
 	local previous = moves[ctx.track]
 	if previous and previous.holding then
 		previous.holding = false
@@ -1694,16 +2102,20 @@ local function onThreatTrack(ctx)
 	moves[ctx.track] = entry
 	labEvent("THREAT", { threat = entry.threat, distance = ctx.distance })
 
+	if ctx.kind == "BARRAGE" and Settings.punishConsec and ctx.distance <= Settings.punishRange + 8 then
+		armPunish(entry, "consec")
+	end
+
 	if ctx.kind == "BARRAGE" and Settings.consecBlock and ctx.distance <= Settings.consecRange then
 		if math.random() * 100 < Settings.consecChance and holdBlock() then
 			entry.holding = true
 			entry.handled = true
 			log("consec: holding block")
 		end
-	elseif ctx.kind == "SHOVE" and Settings.shoveM1 and ctx.distance <= Settings.shoveRange then
+	elseif ctx.kind == "SHOVE" and Settings.shoveM1 and ctx.distance <= Settings.shoveRange and Zenny.roll(Settings.shoveRate) then
 		local targetRoot = ctx.root
 		log("shove seen: M1 queued")
-		task.delay(Settings.shoveDelay, function()
+		task.delay(Settings.shoveDelay + Zenny.slop(Settings.shoveRate, 0.1), function()
 			local _, myRoot = getMe()
 			if myRoot and targetRoot.Parent then
 				startLock(targetRoot, true)
@@ -1712,6 +2124,57 @@ local function onThreatTrack(ctx)
 			end
 		end)
 	end
+end
+
+---Check whether an enemy's move can reach us right now.
+---@param root BasePart
+---@param kind string
+---@param strict boolean? Also require them to face us.
+---@return boolean
+function Zenny.canThreaten(root, kind, strict)
+	local _, myRoot = getMe()
+	if not myRoot or not root.Parent then
+		return false
+	end
+
+	local offset = myRoot.Position - root.Position
+	local distance = offset.Magnitude
+	if distance > Settings.blockRange then
+		return false
+	end
+
+	if kind == "SHOVE" and not Settings.blockShove then
+		return false
+	end
+
+	local flat = Vector3.new(offset.X, 0, offset.Z)
+	if flat.Magnitude < 0.1 then
+		return true
+	end
+
+	local look = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+	if look.Magnitude > 0.1 then
+		local facing = look.Unit:Dot(flat.Unit)
+		if strict and facing < 0.2 then
+			return false
+		end
+
+		if Settings.faceCheck and distance >= 8 and facing < -0.1 then
+			return false
+		end
+	end
+
+	if Settings.blockFov < 359 then
+		local ourLook = Vector3.new(myRoot.CFrame.LookVector.X, 0, myRoot.CFrame.LookVector.Z)
+		if ourLook.Magnitude > 0.1 then
+			local angle = math.deg(math.acos(math.clamp(ourLook.Unit:Dot((-flat).Unit), -1, 1)))
+			if angle > Settings.blockFov / 2 then
+				return false
+			end
+		end
+	end
+
+	return true
 end
 
 ---Block or evade due attacks and release finished holds.
@@ -1733,11 +2196,45 @@ local function updateThreats()
 				releaseBlock()
 			end
 
+			-- They cancelled the move early: do not stay stuck in block for the rest of it.
+			if entry.blockEnd and blockUntil == entry.blockEnd and (entry.length or 0) > 0 and elapsed < entry.length - 0.12 and not entry.hitUs then
+				local keep = os.clock() + math.max(Settings.blockTail * 0.5, 0.1)
+				local chained = false
+				for otherTrack, other in pairs(moves) do
+					if otherTrack ~= track then
+						chained = chained or other.root == entry.root
+						if other.blockEnd and other.blockEnd > keep then
+							keep = other.blockEnd
+						end
+					end
+				end
+
+				-- A new swing from the same enemy keeps the block, so a string never drops it.
+				if not chained and keep < blockUntil then
+					blockUntil = keep
+					blockHoldUntil = keep
+					log("block cut short: move cancelled")
+				end
+			end
+
+			-- Late fallback for swings whose end could not be predicted.
+			if entry.punish and not entry.punishFired then
+				firePunish(entry, "move ended")
+			end
+
 			if entry.root.Parent and not entry.hitUs then
 				lastMoveEnd[entry.root] = os.clock()
 			end
 			moves[track] = nil
 			continue
+		end
+
+		-- Send the punish early enough that it arrives as the swing ends.
+		if entry.punish and not entry.punishFired and elapsed > 0.15 then
+			local remaining = punishRemaining(track, entry, elapsed)
+			if remaining and remaining <= getLead() + Settings.punishOffset - (entry.punishSlop or 0) then
+				firePunish(entry, "timed")
+			end
 		end
 
 		if entry.holding then
@@ -1748,11 +2245,31 @@ local function updateThreats()
 			end
 		end
 
-		if entry.threat and not entry.handled then
-			local data = moveData[entry.id]
-			local hitTime = Settings.adaptiveBlock and data and data.hit
+		-- A move that started out of range can still come for us: check again early on.
+		if not entry.threat and not entry.handled and elapsed < 0.7 and Zenny.canThreaten(entry.root, entry.kind, true) then
+			entry.threat = true
+			log(string.format("%s: late threat, now in range", entry.kind))
+		end
 
-			if not hitTime or elapsed >= hitTime - lead then
+		if entry.threat and not entry.handled then
+			-- Learned hit timing is only trusted after a few hits, and never delays the block past 0.6s.
+			local data = moveData[entry.id]
+			local hitTime = Settings.adaptiveBlock and data and data.hits >= 3 and data.hit
+
+			-- Block After: Auto learns it, Ping waits your average ping, Fixed uses the slider.
+			local ready
+			local sinceSeen = os.clock() - entry.startedAt
+			if Settings.blockAfterMode == "Ping" then
+				ready = sinceSeen >= (pingAverage or getPing()) / 1000 + entry.slop
+			elseif Settings.blockAfterMode == "Fixed" then
+				ready = sinceSeen >= Settings.blockAfter + entry.slop
+			elseif hitTime then
+				ready = elapsed >= math.min(hitTime - lead, 0.6) + entry.slop
+			else
+				ready = sinceSeen >= entry.slop
+			end
+
+			if ready then
 				entry.handled = true
 
 				-- Consec moves get dodged when evasive covers them.
@@ -1761,7 +2278,11 @@ local function updateThreats()
 					evaded = pressEvasive()
 				end
 
-				if not evaded and Settings.autoBlock then
+				if not evaded and Settings.autoBlock and not entry.rolled then
+					log("block skipped: rate roll")
+				end
+
+				if not evaded and Settings.autoBlock and entry.rolled then
 					-- Face the attacker so the block covers the hit.
 					if Settings.blockFace and entry.root.Parent then
 						local _, myRoot = getMe()
@@ -1773,13 +2294,33 @@ local function updateThreats()
 
 					-- Hold through the whole move so a late hit frame is still blocked.
 					local duration = Settings.blockHold
-					if hitTime then
+					if Settings.blockHoldMode == "Fixed" then
+						duration = Settings.blockHold
+					elseif hitTime then
 						duration = math.max(hitTime - elapsed + 0.3, Settings.blockHold)
 					elseif Settings.blockFull then
 						duration = math.clamp((entry.length or 0.5) - elapsed + 0.1, Settings.blockHold, 1.4)
 					end
 
+					local expectedEnd = os.clock() + duration + Settings.blockTail
 					pressBlock(duration + Settings.blockTail)
+
+					-- Remember our own block end so a cancelled move can shorten it.
+					if blockUntil <= expectedEnd + 0.001 then
+						entry.blockEnd = blockUntil
+					end
+
+					-- Log when the block went down after the animation was seen.
+					local row = entry.timingKey and Zenny.timings[entry.timingKey]
+					if row then
+						row.blockAt = row.blockAt and (row.blockAt * 0.7 + sinceSeen * 0.3) or sinceSeen
+					end
+					Zenny.timeLog(string.format("block %d ms after %s, hold %.2fs (%s/%s)", math.floor(sinceSeen * 1000), entry.kind, duration, Settings.blockAfterMode, Settings.blockHoldMode))
+
+					-- Blocked an M1: punish it when the swing ends.
+					if Settings.punishBlock and entry.kind == "ATTACK" and (learned.m1[entry.id] or (entry.length or 0) <= M1_MAX_LENGTH) then
+						armPunish(entry, "block")
+					end
 				end
 			end
 		end
@@ -1958,6 +2499,10 @@ local function onOwnTrack(track, fromEvent)
 
 	ownActionUntil = os.clock() + Settings.selfGrace
 
+	if not ownDash then
+		Bot.lastAction = track
+	end
+
 	local isUppercut = id and (UPPERCUT_IDS[id] or learned.uppercut[id]) or track.Name:lower():find("uppercut", 1, true)
 	if Settings.techLoop and not techBusy and isUppercut then
 		local _, myRoot = getMe()
@@ -2101,6 +2646,7 @@ local function onEnemyTrack(character, track, fromEvent)
 		distance = distance,
 		t0 = track.TimePosition,
 	}
+	ctx.timingKey = Zenny.noteTiming(ctx)
 
 	if kind == "RIGHT" or kind == "LEFT" or kind == "BACK" or kind == "FRONT" then
 		onDashTrack(ctx)
@@ -2122,11 +2668,13 @@ local function needsScan()
 		or Settings.catchEnabled
 		or Settings.catchVisual
 		or Settings.catchFace
-		or Settings.bdcEnabled
+		or Settings.bdcCatch
 		or Settings.frontBlock
 		or Settings.safeIndicator
 		or Settings.counterBait
 		or Settings.counterPunish
+		or Settings.punishBlock
+		or Settings.punishConsec
 end
 
 ---Hook and poll every enemy animator in range.
@@ -3679,6 +4227,18 @@ end
 ---@param kind string
 ---@param track AnimationTrack
 function Bot.onOwnDash(kind, track)
+	-- Dashing while an attack is still playing is a dash cancel.
+	local now = os.clock()
+	if Settings.dashCancelPopup and Bot.lastAction and Bot.lastAction ~= track and Bot.lastAction.IsPlaying then
+		Bot.cancelCount = (now - Bot.cancelAt < 3) and Bot.cancelCount + 1 or 1
+		Bot.cancelAt = now
+		Bot.popup(string.format("+%d DASH CANCEL", Bot.cancelCount), COLORS.now, 0.62)
+	end
+
+	if Settings.sideBoost and (kind == "LEFT" or kind == "RIGHT") then
+		Bot.boostDash(kind, track)
+	end
+
 	local enabled = (kind == "FRONT" and Settings.assistFront) or (kind == "BACK" and Settings.assistBack) or ((kind == "LEFT" or kind == "RIGHT") and Settings.assistSide)
 	local targetRoot = Bot.assistRoot
 	local _, myRoot = getMe()
@@ -3708,6 +4268,103 @@ function Bot.onOwnDash(kind, track)
 			clickM1("dash assist")
 		end
 	end)
+end
+
+---Stretch a side dash: once the game's own dash ends, keep pushing along it.
+---@param kind string
+---@param track AnimationTrack
+function Bot.boostDash(kind, track)
+	local character, myRoot, humanoid = getMe()
+	if Bot.boosting or not (character and myRoot and humanoid) or Settings.boostLength <= 1.01 then
+		return
+	end
+
+	local cframe = myRoot.CFrame
+	local side = kind == "RIGHT" and cframe.RightVector or -cframe.RightVector
+	local direction = Vector3.new(side.X, 0, side.Z)
+	if direction.Magnitude < 0.1 then
+		return
+	end
+	direction = direction.Unit
+
+	Bot.boosting = true
+	task.spawn(function()
+		local length = track.Length > 0 and track.Length or 0.4
+		local speed = dashSpeeds[kind] or Settings.catchSpeed
+		local startedAt = os.clock()
+		local endAt = startedAt + length * Settings.boostLength
+
+		while os.clock() < endAt and myRoot.Parent and humanoid.Health > 0 do
+			runService.Heartbeat:Wait()
+			if isRagdolled(character, humanoid) then
+				break
+			end
+
+			-- The game's own dash covers the first stretch.
+			if os.clock() - startedAt >= length then
+				local velocity = myRoot.AssemblyLinearVelocity
+				myRoot.AssemblyLinearVelocity = Vector3.new(direction.X * speed, velocity.Y, direction.Z * speed)
+			end
+		end
+
+		Bot.boosting = false
+	end)
+end
+
+---Flash a short message on screen; a new one at the same height replaces the old.
+---@param text string
+---@param color Color3
+---@param height number Screen height as a 0-1 scale.
+function Bot.popup(text, color, height)
+	if not gui then
+		return
+	end
+
+	local previous = Bot.popups[height]
+	if previous then
+		previous:Destroy()
+	end
+
+	local label = newInstance("TextLabel", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, height),
+		Size = UDim2.fromOffset(280, 30),
+		BackgroundTransparency = 1,
+		Text = text,
+		TextColor3 = color,
+		TextTransparency = 1,
+		TextStrokeTransparency = 0.5,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 20,
+	}, gui)
+	Bot.popups[height] = label
+
+	tween(label, { TextTransparency = 0, Position = UDim2.fromScale(0.5, height - 0.02) }, QUICK)
+	task.delay(0.9, function()
+		if not label.Parent then
+			return
+		end
+
+		tween(label, { TextTransparency = 1, TextStrokeTransparency = 1 })
+		task.delay(0.3, function()
+			label:Destroy()
+		end)
+	end)
+end
+
+---Flip a feature from its toggle key and show the result.
+---@param bind table
+function Bot.toggle(bind)
+	Settings[bind.setting] = not Settings[bind.setting]
+
+	local refresh = uiRefreshers[bind.setting]
+	if refresh then
+		refresh(true)
+	end
+
+	local on = Settings[bind.setting]
+	Bot.popup(string.format("%s %s", bind.title, on and "ON" or "OFF"), on and COLORS.good or COLORS.bad, 0.12)
+	log(string.format("%s toggled %s", bind.title, on and "on" or "off"))
 end
 
 ---Pick the enemy the bot should fight.
@@ -5300,13 +5957,25 @@ function Bot.pathIntercept(offset, velocity, remaining, radius)
 		return 0
 	end
 
-	for t = 0.025, remaining, 0.025 do
-		if (offset + velocity * t).Magnitude <= radius then
-			return t
-		end
+	-- Solve |offset + velocity * t| = radius for the first time they get inside.
+	local a = velocity:Dot(velocity)
+	if a < 1e-4 then
+		return nil
 	end
 
-	return nil
+	local b = 2 * offset:Dot(velocity)
+	local c = offset:Dot(offset) - radius * radius
+	local discriminant = b * b - 4 * a * c
+	if discriminant < 0 then
+		return nil
+	end
+
+	local time = (-b - math.sqrt(discriminant)) / (2 * a)
+	if time < 0 or time > remaining then
+		return nil
+	end
+
+	return time
 end
 
 ---Remember a side dash so chained dashes can be expected.
@@ -5466,6 +6135,12 @@ end
 ---@param input InputObject
 ---@param processed boolean
 function Bot.onKey(input, processed)
+	-- A keybind row is waiting for its key.
+	if bindCapture and input.UserInputType == Enum.UserInputType.Keyboard then
+		bindCapture(input.KeyCode)
+		return
+	end
+
 	if processed then
 		return
 	end
@@ -5483,6 +6158,13 @@ function Bot.onKey(input, processed)
 		Bot.cycleLock()
 	elseif code == Bot.keys.combo then
 		Bot.playSelected()
+	else
+		for _, bind in ipairs(TOGGLE_BINDS) do
+			if Settings[bind.key] == code.Name then
+				Bot.toggle(bind)
+				break
+			end
+		end
 	end
 end
 
@@ -5905,7 +6587,7 @@ local function evaluateDash(run, test, distance)
 	end
 
 	local result = { lines = {}, timeline = timeline }
-	local enabled = test.kind == "BACK" and Settings.bdcEnabled or Settings.catchEnabled
+	local enabled = test.kind == "BACK" and Settings.bdcCatch or Settings.catchEnabled
 
 	if windowStart then
 		table.insert(
@@ -6639,6 +7321,49 @@ local function addCycle(card, title, subtitle, key, options)
 	end)
 end
 
+---Add a row that binds a toggle key; Backspace clears it and Escape cancels.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param key string
+local function addKeybind(card, title, subtitle, key)
+	local row = createRow(card, title, subtitle, "TextButton")
+
+	local pill = newInstance("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(74, 24),
+		BackgroundColor3 = COLORS.off,
+		TextColor3 = COLORS.accent,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		Text = Settings[key],
+	}, row)
+	newInstance("UICorner", { CornerRadius = UDim.new(0, 8) }, pill)
+
+	registerRefresher(key, function()
+		pill.Text = Settings[key]
+	end)
+
+	connect(row.MouseButton1Click, function()
+		-- Cancel any other row that is still listening.
+		if bindCapture then
+			bindCapture(Enum.KeyCode.Escape)
+		end
+
+		pill.Text = "..."
+		bindCapture = function(code)
+			bindCapture = nil
+			if code == Enum.KeyCode.Backspace then
+				Settings[key] = "None"
+			elseif code ~= Enum.KeyCode.Escape then
+				Settings[key] = code.Name
+			end
+			pill.Text = Settings[key]
+		end
+	end)
+end
+
 ---Add a row with an action button.
 ---@param card Frame
 ---@param title string
@@ -6715,13 +7440,18 @@ local INDICATOR_LIST = {
 	{ "adaptiveBlock", "Adaptive Timing" },
 	{ "autoEvasive", "Auto Evasive" },
 	{ "consecBlock", "Consec Block" },
+	{ "punishBlock", "Punish M1" },
+	{ "punishConsec", "Punish Consec" },
 	{ "shoveM1", "Shove M1" },
 	{ "catchEnabled", "Side Dash M1" },
-	{ "bdcEnabled", "Backdash M1" },
+	{ "bdcCatch", "Backdash Cancel M1" },
 	{ "frontBlock", "Front Dash Block" },
 	{ "catchFace", "Lock" },
 	{ "techLoop", "Tech" },
 	{ "counterBait", "Counter Bait" },
+	{ "sideBoost", "Side Dash Boost" },
+	{ "lagComp", "Lag Comp" },
+	{ "botEnabled", "Bot" },
 }
 
 ---Build the window, pages, quick pills and indicators.
@@ -7451,7 +8181,7 @@ local function buildGui()
 	for index, info in ipairs({
 		{ "Auto Block", "autoBlock", "🛡" },
 		{ "Side Dash M1", "catchEnabled", "💨" },
-		{ "Backdash M1", "bdcEnabled", "⏪" },
+		{ "BDC M1", "bdcCatch", "⏪" },
 		{ "Front Dash Block", "frontBlock", "⚡" },
 	}) do
 		local tile = newInstance("TextButton", {
@@ -7554,47 +8284,53 @@ local function buildGui()
 
 	local block = addSection(combat, "Auto Block")
 	addSwitch(block, "Auto Block", "Hold F when an attack starts", "autoBlock")
-	addSwitch(block, "Adaptive Timing", "Learns when each move lands", "adaptiveBlock")
-	addSwitch(block, "Hold Through Move", "Keep blocking until it ends", "blockFull")
-	addSwitch(block, "Broad Detection", "Count any one-shot move", "broadDetect")
-	addSwitch(block, "Face Attacker", "Turn toward them while blocking", "blockFace")
-	addSlider(block, "Range", "How close they must be", "blockRange", 8, 40, 1, " studs")
-	addSlider(block, "Hold Time", "Minimum time F is held", "blockHold", 0.1, 1, 0.05, "s")
-	addSlider(block, "Block Lead", "React this early", "blockLead", 0, 0.3, 0.01, "s")
-	addSlider(block, "Chain Tail", "Extra hold after a move", "blockTail", 0, 0.6, 0.05, "s")
-	addSwitch(block, "Front Dash Block", "Block until their front dash ends", "frontBlock")
-	addSwitch(block, "Front Dash M1", "M1 when their front dash ends", "frontM1")
-	addSlider(block, "Front Dash Hold", "Longest block, 0 holds until it ends", "frontMaxHold", 0, 3, 0.1, "s")
-	addSwitch(block, "Consec Block", "Hold F during consecutive punches", "consecBlock")
-	addSlider(block, "Consec Chance", "Chance to react to a barrage", "consecChance", 0, 100, 5, "%")
-	addAction(block, "Learn Consec", "Then use your own consec", "Learn", function()
-		learning = "barrage"
-		log("learning consec: use your consecutive punches now")
+	addKeybind(block, "Toggle Key", "Backspace clears it", "keyAutoBlock")
+	addSlider(block, "Auto Block Rate", "100% blocks everything on time, lower misses more", "blockRate", 0, 100, 5, "%")
+	addAction(block, "Whitelist", "Skip friends and chosen players", "Open", function()
+		selectTab("Whitelist")
 	end)
+
+	block = addSection(combat, "Front Dash Block")
+	addSwitch(block, "Front Dash Block", "Block bullet dashes aimed at you, M1 as they land", "frontBlock")
+	addKeybind(block, "Toggle Key", "Backspace clears it", "keyFrontBlock")
+	addSlider(block, "Front Dash Block Rate", "100% never misses a dash, lower misses more", "frontRate", 0, 100, 5, "%")
 	addAction(block, "Learn Front Dash", "Then front dash yourself", "Learn", function()
 		learning = "front"
 		log("learning front dash: front dash now")
 	end)
 	addInfo(block, "Learned", function()
-		if learning == "barrage" or learning == "front" then
-			return "waiting..."
-		end
-
-		return string.format("consec %d, front %d ids", countLearned("barrage"), countLearned("front"))
+		return learning == "front" and "waiting..." or (countLearned("front") .. " ids")
 	end)
+
+	block = addSection(combat, "Consec Block")
+	addSwitch(block, "Consec Block", "Hold F during consecutive punches", "consecBlock")
+	addKeybind(block, "Toggle Key", "Backspace clears it", "keyConsecBlock")
+	addSlider(block, "Consec Block Rate", "100% reacts to every barrage, lower misses more", "consecChance", 0, 100, 5, "%")
+	addAction(block, "Learn Consec", "Then use your own consec", "Learn", function()
+		learning = "barrage"
+		log("learning consec: use your consecutive punches now")
+	end)
+	addInfo(block, "Learned", function()
+		return learning == "barrage" and "waiting..." or (countLearned("barrage") .. " ids")
+	end)
+
+	block = addSection(combat, "Punish")
+	addSwitch(block, "Punish Blocked M1", "Send a timed M1 back after blocking an M1", "punishBlock")
+	addKeybind(block, "Toggle Key", "Backspace clears it", "keyPunishBlock")
+	addSwitch(block, "Punish Consec", "Wait for a consec to end, then send a timed M1", "punishConsec")
+	addKeybind(block, "Toggle Key", "Backspace clears it", "keyPunishConsec")
+	addSlider(block, "Punish Rate", "100% punishes every time, lower misses more", "punishRate", 0, 100, 5, "%")
 
 	local evade = addSection(combat, "Auto Evasive")
 	addSwitch(evade, "Enabled", "Spams dash to cancel ragdoll", "autoEvasive")
-	addCycle(evade, "Mode", "When it triggers", "evasiveMode", { "Ragdoll", "Consec", "Both" })
-	addCycle(evade, "Direction", "Dash direction", "evasiveDirection", { "Back", "Left", "Right" })
-	addSwitch(evade, "Hold Block", "Hold F while spamming", "evasiveBlock")
-	addSlider(evade, "Spam Rate", "Seconds between dashes", "evasiveRate", 0.02, 0.2, 0.01, "s")
+	addKeybind(evade, "Toggle Key", "Backspace clears it", "keyEvasive")
+	addSlider(evade, "Auto Evasive Rate", "100% dashes out of every ragdoll, lower misses more", "evasiveChance", 0, 100, 5, "%")
 
 	local shove = addSection(combat, "Shove Auto M1")
 	addSwitch(shove, "Enabled", "M1 when a shove is seen", "shoveM1")
+	addKeybind(shove, "Toggle Key", "Backspace clears it", "keyShoveM1")
 	addSwitch(shove, "Also Block", "Block shoves too", "blockShove")
-	addSlider(shove, "M1 Delay", "Wait before M1", "shoveDelay", 0, 0.5, 0.01, "s")
-	addSlider(shove, "Range", "How close they must be", "shoveRange", 5, 40, 1, " studs")
+	addSlider(shove, "Shove M1 Rate", "100% punishes every shove, lower misses more", "shoveRate", 0, 100, 5, "%")
 	addAction(shove, "Learn Move", "Then use your own shove", "Learn", function()
 		learning = "shove"
 		log("learning shove: use your shove now")
@@ -8058,7 +8794,7 @@ local function buildGui()
 	addSlider(tune, "Timing Offset", "Fire earlier (+) or later (-)", "catchOffset", -0.15, 0.25, 0.01, "s")
 	addSlider(tune, "Close Delay", "Wait before M1", "catchCloseDelay", 0, 0.6, 0.01, "s")
 	addSlider(tune, "Far Delay", "Wait before M1", "catchFarDelay", 0, 0.6, 0.01, "s")
-	addSwitch(tune, "Backdash Auto M1", "Needed for backdash tests", "bdcEnabled")
+	addSwitch(tune, "Backdash Cancel M1", "Needed for backdash tests", "bdcCatch")
 	addSlider(tune, "Backdash Reach", "M1 only fires inside this", "bdcReach", 4, 30, 1, " studs")
 	addSlider(tune, "Backdash Delay", "Wait before M1", "bdcDelay", 0, 0.6, 0.01, "s")
 	addSwitch(tune, "Front Dash Block", "Needed for front dash tests", "frontBlock")
@@ -8088,29 +8824,23 @@ local function buildGui()
 	addAction(input, "Test M1", "Send one M1", "Test", function()
 		clickM1("test")
 	end)
+	addSwitch(input, "Lag Compensation", "Send inputs early by ping, jitter and one frame", "lagComp")
 
 	local side = addSection(dashPage, "Side Dash")
 	addSwitch(side, "Auto M1", "M1 on a side dash", "catchEnabled")
+	addKeybind(side, "Toggle Key", "Backspace clears it", "keySideDashM1")
+	addSlider(side, "Auto M1 Catch Rate", "100% catches every side dash on time, lower misses more", "catchRate", 0, 100, 5, "%")
 	addSwitch(side, "Predict And Block", "Block side dashes that will reach you", "dashPredict")
-	addSwitch(side, "Predictor", "Walk the dash path: M1 if it lands, else block, sent early", "dashPredictor")
-	addSwitch(side, "Anticipate", "Arm early on chained dashes, moves ending and strafing", "dashAnticipate")
-	addSlider(side, "Predict Lead", "Extra seconds to send inputs early", "predictLead", 0, 0.15, 0.01, "s")
-	addSwitch(side, "Lock Target", "Face them during the catch", "catchFace")
-	addSwitch(side, "Smart Timing", "Predict arrival, skip fixed delays", "catchSmart")
 	addSwitch(side, "Visualizer", "Rings and timing line", "catchVisual")
-	addSlider(side, "Timing Offset", "Fire earlier (+) or later (-)", "catchOffset", -0.15, 0.25, 0.01, "s")
-	addSlider(side, "Fixed Delay", "Wait before M1 when Smart is off", "catchDelay", 0, 0.6, 0.01, "s")
-	addSlider(side, "Max Range", "Far range", "catchRange", 5, 60, 1, " studs")
-	addSlider(side, "Hit Reach", "M1 only fires inside this", "catchReach", 4, 30, 1, " studs")
-	addSlider(side, "Lock Time", "How long to lock on", "catchLock", 0.5, 2.5, 0.1, "s")
-	addSlider(side, "Block Reach", "Block if they get this close", "predictReach", 4, 20, 1, " studs")
-	addSlider(side, "Block After", "Keep blocking after arrival", "predictTail", 0, 1, 0.05, "s")
 
-	local back = addSection(dashPage, "Backdash M1")
-	addSwitch(back, "Enabled", "M1 on a backdash", "bdcEnabled")
-	addSlider(back, "Range", "How close they must be", "bdcRange", 5, 60, 1, " studs")
-	addSlider(back, "Hit Reach", "M1 only fires inside this", "bdcReach", 4, 30, 1, " studs")
-	addSlider(back, "Delay", "Wait before M1", "bdcDelay", 0, 0.6, 0.01, "s")
+	local boost = addSection(dashPage, "Side Dash Boost")
+	addSwitch(boost, "Boost", "Longer side dash", "sideBoost")
+	addKeybind(boost, "Toggle Key", "Backspace clears it", "keySideBoost")
+
+	local back = addSection(dashPage, "Backdash Cancel M1")
+	addSwitch(back, "Enabled", "Perfectly timed M1 when someone backdash cancels", "bdcCatch")
+	addKeybind(back, "Toggle Key", "Backspace clears it", "keyBackdashM1")
+	addSlider(back, "Backdash Cancel M1 Rate", "100% punishes every cancel on time, lower misses more", "bdcRate", 0, 100, 5, "%")
 	addAction(back, "Learn Backdash", "Then backdash yourself", "Learn", function()
 		learning = "back"
 		log("learning backdash: backdash now")
@@ -8122,6 +8852,60 @@ local function buildGui()
 	local counters = addSection(dashPage, "Counters")
 	addSwitch(counters, "Counter Bait", "No M1 into a counter", "counterBait")
 	addSwitch(counters, "Counter Punish", "M1 when a counter ends", "counterPunish")
+
+	-- Timing. Scoped so its sections do not count against the function's locals.
+	do
+		local timingPage = addPage("Timing", 9, "⏱")
+
+		local blockTiming = addSection(timingPage, "Block Timing")
+		addCycle(blockTiming, "Block After", "Auto learns it, Ping waits your average ping", "blockAfterMode", { "Auto", "Ping", "Fixed" })
+		addSlider(blockTiming, "Fixed Block After", "Used when Block After is Fixed", "blockAfter", 0, 0.4, 0.01, "s")
+		addCycle(blockTiming, "Hold", "Auto holds through the whole move", "blockHoldMode", { "Auto", "Fixed" })
+		addSlider(blockTiming, "Fixed Hold", "Used when Hold is Fixed", "blockHold", 0.1, 1, 0.05, "s")
+		addInfo(blockTiming, "Avg Ping", function()
+			return string.format("%d ms", math.floor(pingAverage or getPing()))
+		end)
+
+		local timingTools = addSection(timingPage, "Tools")
+		addAction(timingTools, "Clear Logger", "Empty the timing log", "Clear", function()
+			table.clear(Zenny.timingLog)
+		end)
+		addAction(timingTools, "Clear Timings", "Forget every animation timing", "Clear", function()
+			table.clear(Zenny.timings)
+		end)
+
+		---Add a card holding one block of text that refreshes while the tab is open.
+		---@param title string
+		---@param getText function
+		local function addTextCard(title, getText)
+			local card = addSection(timingPage, title)
+			local label = newInstance("TextLabel", {
+				Size = UDim2.new(1, -24, 0, 0),
+				Position = UDim2.fromOffset(12, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				BackgroundTransparency = 1,
+				Text = "",
+				TextColor3 = COLORS.dim,
+				TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextYAlignment = Enum.TextYAlignment.Top,
+				Font = Enum.Font.Code,
+				TextSize = 11,
+				LayoutOrder = 1,
+			}, card)
+			newInstance("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }, card)
+
+			table.insert(infoRows, {
+				label = label,
+				get = function()
+					return activeTab == "Timing" and getText() or label.Text
+				end,
+			})
+		end
+
+		addTextCard("Timing Logger", Zenny.timingLogText)
+		addTextCard("Animation Timings", Zenny.timingText)
+	end
 
 	-- Visuals.
 	local visualsPage = addPage("Visuals", 10, "👁")
@@ -8181,7 +8965,9 @@ local function buildGui()
 	local miscPage = addPage("Misc", 12, "☰")
 	local interface = addSection(miscPage, "Interface")
 	addSwitch(interface, "Quick Pills", "Toggle buttons on the left", "quickPills")
-	addSwitch(interface, "Indicators", "Active feature list", "indicators")
+	addSwitch(interface, "Indicators", "Feature list on the left", "indicators")
+	addSwitch(interface, "Show Inactive", "Dim off features in the list", "indicatorsAll")
+	addSwitch(interface, "Dash Cancel Popup", "+1 DASH CANCEL when you dash out of a move", "dashCancelPopup")
 
 	local presets = addSection(miscPage, "Presets")
 	addCycle(presets, "Slot", "Preset slot", "presetSlot", { "Slot 1", "Slot 2", "Slot 3" })
@@ -8519,6 +9305,7 @@ local function buildGui()
 		TextYAlignment = Enum.TextYAlignment.Top,
 		Font = Enum.Font.GothamMedium,
 		TextSize = 13,
+		RichText = true,
 		Text = "",
 	}, gui)
 
@@ -8532,10 +9319,13 @@ local function buildGui()
 		indicatorElapsed = 0
 		indicatorLabel.Visible = Settings.indicators
 
-		local lines = {}
+		-- Active features light up; the rest stay dim so the whole kit is visible.
+		local lines = { string.format('<font color="#%s"><b>Slotted</b></font>', COLORS.accent:ToHex()) }
 		for _, info in ipairs(INDICATOR_LIST) do
 			if Settings[info[1]] then
-				table.insert(lines, info[2])
+				table.insert(lines, string.format('<font color="#%s">%s</font>', COLORS.good:ToHex(), info[2]))
+			elseif Settings.indicatorsAll then
+				table.insert(lines, string.format('<font color="#%s">%s</font>', COLORS.dim:ToHex(), info[2]))
 			end
 		end
 		indicatorLabel.Text = table.concat(lines, "\n")
@@ -8549,7 +9339,8 @@ end
 function Zenny.init()
 	buildGui()
 
-	connect(runService.Heartbeat, function()
+	connect(runService.Heartbeat, function(delta)
+		updateLag(delta)
 		scanOwn()
 		scanEnemies()
 		updateThreats()
