@@ -20,17 +20,17 @@ local coreGuiService = game:GetService("CoreGui")
 local BLOCK_KEY = Enum.KeyCode.F
 local TOGGLE_KEY = Enum.KeyCode.RightShift
 local COLORS = {
-	card = Color3.fromRGB(17, 17, 20),
-	accent = Color3.fromRGB(245, 245, 248),
-	accentDark = Color3.fromRGB(105, 105, 115),
-	text = Color3.fromRGB(248, 248, 250),
-	dim = Color3.fromRGB(155, 155, 164),
-	off = Color3.fromRGB(35, 35, 41),
-	good = Color3.fromRGB(235, 235, 240),
-	now = Color3.fromRGB(205, 205, 212),
-	bad = Color3.fromRGB(175, 175, 182),
-	warn = Color3.fromRGB(220, 220, 226),
-	ink = Color3.fromRGB(5, 5, 7),
+	card = Color3.fromRGB(12, 12, 12),
+	accent = Color3.fromRGB(255, 255, 255),
+	accentDark = Color3.fromRGB(165, 165, 165),
+	text = Color3.fromRGB(245, 245, 245),
+	dim = Color3.fromRGB(150, 150, 150),
+	off = Color3.fromRGB(32, 32, 32),
+	good = Color3.fromRGB(120, 255, 190),
+	now = Color3.fromRGB(255, 240, 130),
+	bad = Color3.fromRGB(255, 110, 130),
+	warn = Color3.fromRGB(255, 200, 110),
+	ink = Color3.fromRGB(0, 0, 0),
 }
 local DASH_TYPES = {
 	["10480793962"] = "RIGHT",
@@ -76,19 +76,34 @@ local Bot = {
 	slots = { "Combo 1", "Combo 2", "Combo 3", "Combo 4" },
 	allSlots = { "Combo 1", "Combo 2", "Combo 3", "Combo 4", "Punish", "Poke", "Ragdoll", "Guard Break", "Finisher" },
 	ragdolled = false,
-	brainAt = 0,
 	selfLastM1 = nil,
 	selfOpponent = nil,
 	selfOpponentAt = 0,
 	hookUntil = 0,
 	faded = true,
+	tile = 5,
+	adapt = nil,
+	armed = nil,
+	tapTarget = nil,
+	tapMarker = nil,
+	lastTap = nil,
+	frontLockAuto = false,
+	frontLockUntil = nil,
+	lines = nil,
+	myHumanoid = nil,
+	anticipateAt = 0,
+	dashMemory = setmetatable({}, { __mode = "k" }),
+	oppAt = 0,
+	lastTick = 0,
+	lastHealth = 0,
+	bonusAt = 0,
+	spaceBonus = 0,
+	nextSurprise = 0,
+	macroRun = nil,
+	pendingTech = nil,
+	lastTech = "none yet",
 	rollAt = 0,
 	longArmOk = false,
-	brainWatching = 0,
-	brainResult = "none yet",
-	blended = nil,
-	blendedAt = 0,
-	brainWatched = setmetatable({}, { __mode = "k" }),
 	resetAt = 0,
 	lesson = nil,
 	lessonRoot = nil,
@@ -171,15 +186,8 @@ Bot.style = shared.ZennyStyle or Bot.newStyle()
 Bot.ensureTypes(Bot.style)
 shared.ZennyStyle = Bot.style
 
--- What the brain learned from other players survives re-executes too.
-Bot.profiles = shared.ZennyProfiles or {}
-shared.ZennyProfiles = Bot.profiles
-Bot.profileNames = { "None" }
-for name, profile in pairs(Bot.profiles) do
-	Bot.ensureTypes(profile.style)
-	table.insert(Bot.profileNames, name)
-end
-
+Bot.adapt = shared.ZennyAdapt or {}
+shared.ZennyAdapt = Bot.adapt
 -- State.
 local localPlayer = playersService.LocalPlayer
 local playerGui = localPlayer:WaitForChild("PlayerGui")
@@ -385,10 +393,6 @@ local Settings = {
 	backStepRange = 11,
 	backStepDelay = 0.05,
 	botStringHits = 4,
-	brainOn = false,
-	brainRange = 60,
-	brainMode = "Mine",
-	brainMentor = "None",
 	longArm = true,
 	longArmChance = 10,
 	longArmBacklash = 35,
@@ -398,6 +402,38 @@ local Settings = {
 	hookAwayAngle = 60,
 	hookWindow = 0.5,
 	hookFade = true,
+	spacePerfect = true,
+	spaceTiles = 4,
+	adapterOn = true,
+	techWindow = 2,
+	bulletDash = true,
+	bulletMin = 14,
+	bulletMax = 30,
+	skibidiDash = true,
+	skibidiOffset = 4,
+	surprise = true,
+	surpriseEvery = 6,
+	assistLines = true,
+	assistStrength = 75,
+	assistJitter = 3,
+	assistMaxTurn = 60,
+	assistLead = 0.1,
+	assistDashLength = 18,
+	tapTarget = true,
+	frontLock = true,
+	frontLockRange = 18,
+	frontLockTime = 1.2,
+	dashPredictor = true,
+	dashAnticipate = true,
+	predictLead = 0.03,
+	loopDash = true,
+	loopHits = 2,
+	loopDelay = 0.2,
+	loopFollow = 0.25,
+	bdcMacro = true,
+	bdcHits = 3,
+	cancelDelay = 0.15,
+	bdcReturn = 0.35,
 }
 
 ---Connect a signal and track it for detach.
@@ -439,7 +475,7 @@ local function log(text)
 	end
 
 	if Settings.debugConsole then
-		print("[Zenny] " .. text)
+		print("[Slotted] " .. text)
 	end
 end
 
@@ -1117,7 +1153,7 @@ local function createVisual(entry, myRoot)
 
 	local card = newInstance("Frame", {
 		Size = UDim2.fromScale(1, 1),
-		BackgroundColor3 = Color3.fromRGB(8, 14, 10),
+		BackgroundColor3 = Color3.fromRGB(10, 10, 10),
 		BackgroundTransparency = 0.2,
 		BorderSizePixel = 0,
 	}, billboard)
@@ -1322,6 +1358,13 @@ local function onDashTrack(ctx)
 	end
 	dashes[ctx.track] = entry
 
+	-- A dash we saw coming starts with the predictor already armed.
+	local armed = Bot.armed
+	entry.armed = Settings.dashAnticipate and armed ~= nil and armed.root == ctx.root and os.clock() < armed.untilAt
+	if kind == "RIGHT" or kind == "LEFT" then
+		Bot.noteSideDash(ctx.root)
+	end
+
 	if kind == "FRONT" then
 		-- Block until the dash ends, if it is heading at us.
 		if (ctx.distance < 10 or ctx.root.CFrame.LookVector:Dot(ctx.offset.Unit) > -0.1) and holdBlock() then
@@ -1339,7 +1382,7 @@ local function onDashTrack(ctx)
 		local flat = Vector3.new(ctx.offset.X, 0, ctx.offset.Z).Magnitude
 		local _, myRoot = getMe()
 
-		if autoM1 and myRoot and flat <= reach and not (Settings.counterBait and isCountering(ctx.character)) then
+		if autoM1 and myRoot and flat <= reach + (entry.armed and 2 or 0) and not (Settings.counterBait and isCountering(ctx.character)) then
 			entry.fired = true
 			updateLock(myRoot, true)
 			clickM1(string.format("%s dash d=%d (instant)", kind, flat))
@@ -1359,6 +1402,7 @@ local function updateDashes()
 
 	-- Lead the M1 by half the ping so it lands on time.
 	local lead = Settings.catchPing and (effectivePing() / 2000) or 0
+	Bot.anticipate(myRoot)
 
 	for track, entry in pairs(dashes) do
 		local distance = (entry.root.Position - myRoot.Position).Magnitude
@@ -1437,19 +1481,39 @@ local function updateDashes()
 
 		-- The animation we see is half a ping old and our M1 takes half a ping to
 		-- arrive, so look a full ping ahead, plus the M1's own startup (the offset).
-		local lookahead = (Settings.catchPing and effectivePing() / 1000 or 0) + Settings.catchOffset
+		local lookahead = (Settings.catchPing and effectivePing() / 1000 or 0) + Settings.catchOffset + (Settings.dashPredictor and Settings.predictLead or 0)
 		local relativeVelocity = (velocity - myRoot.AssemblyLinearVelocity) * Vector3.new(1, 0, 1)
 
 		-- A dash stops, so never predict movement past its end.
 		local duration = track.Length > 0 and track.Length or 0.4
 		local travel = math.min(lookahead, math.max(duration - elapsed, 0))
 		local predictedDistance = (flatOffset + relativeVelocity * travel).Magnitude
+		local sideDash = entry.kind == "RIGHT" or entry.kind == "LEFT"
+		local remainingDash = math.max(duration - elapsed, 0)
+		local armBonus = entry.armed and 2 or 0
+
+		-- Predictor: walk the whole dash path. M1 if they will be in reach, block if they
+		-- will only get near enough to hit us, and send it a ping early.
+		if Settings.dashPredictor and Settings.dashPredict and sideDash and not entry.predicted and flatDistance <= Settings.predictRange then
+			local canCatch = Settings.catchEnabled and Bot.pathIntercept(flatOffset, relativeVelocity, remainingDash, reach + armBonus)
+			local threat = Bot.pathIntercept(flatOffset, relativeVelocity, remainingDash, Settings.predictReach)
+			if threat and not canCatch and threat <= math.max(lookahead, 0) + 0.15 + (entry.armed and 0.1 or 0) then
+				entry.predicted = true
+
+				if Settings.blockFace then
+					startLock(entry.root, true)
+					updateLock(myRoot, true)
+				end
+
+				pressBlock(math.max(remainingDash, 0.2) + Settings.predictTail)
+				log(string.format("side dash predictor: block in %.2fs", threat))
+			end
+		end
 
 		-- Side dash prediction for blocking: work out the closest they will come
 		-- along the dash, and have block up before they get there. Auto M1 catch
 		-- handles side dashes itself when it is on.
-		if Settings.dashPredict and (entry.kind == "RIGHT" or entry.kind == "LEFT") and not entry.predicted and not Settings.catchEnabled and flatDistance <= Settings.predictRange then
-			local remainingDash = math.max(duration - elapsed, 0)
+		if not Settings.dashPredictor and Settings.dashPredict and (entry.kind == "RIGHT" or entry.kind == "LEFT") and not entry.predicted and not Settings.catchEnabled and flatDistance <= Settings.predictRange then
 			local path = relativeVelocity * remainingDash
 			local pathLength = path.Magnitude
 			local closestAlong = pathLength > 0.1 and math.clamp(-flatOffset:Dot(path) / (pathLength * pathLength), 0, 1) or 0
@@ -1509,7 +1573,8 @@ local function updateDashes()
 		-- inside hit reach. A target already inside reach gets hit at once.
 		local autoM1 = (entry.kind == "BACK" and Settings.bdcEnabled) or (entry.kind ~= "BACK" and Settings.catchEnabled)
 		local timeOk = Settings.catchSmart or remaining <= lead
-		local inReach = flatDistance <= reach or predictedDistance <= reach
+		local interceptTime = Settings.dashPredictor and Bot.pathIntercept(flatOffset, relativeVelocity, remainingDash, reach + armBonus) or nil
+		local inReach = flatDistance <= reach or predictedDistance <= reach or (interceptTime ~= nil and interceptTime <= math.max(lookahead, 0))
 		if autoM1 and not entry.fired and not entry.countering and timeOk and inReach then
 			entry.fired = true
 			updateLock(myRoot, true)
@@ -2332,7 +2397,7 @@ local function createSafeMarker(root)
 
 	local card = newInstance("Frame", {
 		Size = UDim2.fromScale(1, 1),
-		BackgroundColor3 = Color3.fromRGB(8, 14, 10),
+		BackgroundColor3 = Color3.fromRGB(10, 10, 10),
 		BackgroundTransparency = 0.25,
 		BorderSizePixel = 0,
 	}, billboard)
@@ -2409,7 +2474,6317 @@ local function ensureComboHud()
 		AnchorPoint = Vector2.new(0.5, 0),
 		Position = UDim2.new(0.5, 0, 0, 12),
 		Size = UDim2.fromOffset(170, 38),
-		BackgroundColor3 = Color3.fromRGB(8, 14, 10),
+		BackgroundColor3 = Color3.fromRGB(10, 10, 10),
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
-		Visible = fals
+		Visible = false,
+	}, gui)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, frame)
+	local stroke = newInstance("UIStroke", { Color = COLORS.accent, Transparency = 1, Thickness = 1.5 }, frame)
+
+	local label = newInstance("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.text,
+		TextTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 15,
+	}, frame)
+
+	comboHud = { frame = frame, stroke = stroke, label = label }
+	return comboHud
+end
+
+---Count our hits and damage on nearby enemies and show them in a pill.
+local function updateComboCounter()
+	if not Settings.comboCounter then
+		comboHits = 0
+		if comboHud then
+			comboHud.frame.Visible = false
+		end
+		return
+	end
+
+	local character, myRoot = getMe()
+	if not myRoot then
+		return
+	end
+
+	local now = os.clock()
+	local container = workspace:FindFirstChild("Live") or workspace
+	local gained = false
+
+	for _, enemy in ipairs(container:GetChildren()) do
+		local humanoid = enemy ~= character and enemy:IsA("Model") and enemy:FindFirstChildOfClass("Humanoid")
+		local root = humanoid and enemy:FindFirstChild("HumanoidRootPart")
+		if not root then
+			continue
+		end
+
+		local previous = comboHealth[humanoid]
+		comboHealth[humanoid] = humanoid.Health
+
+		-- Damage on a nearby enemy right after one of our own attacks counts as our hit.
+		if previous and humanoid.Health < previous - 0.5 and (root.Position - myRoot.Position).Magnitude <= 30 and now < ownActionUntil + 0.3 then
+			comboHits += 1
+			comboDamage += previous - humanoid.Health
+			comboLastAt = now
+			gained = true
+		end
+	end
+
+	local hud = ensureComboHud()
+
+	if comboHits > 0 and now - comboLastAt > 2 then
+		comboHits, comboDamage = 0, 0
+		tween(hud.frame, { BackgroundTransparency = 1 })
+		tween(hud.stroke, { Transparency = 1 })
+		tween(hud.label, { TextTransparency = 1 })
+		task.delay(0.25, function()
+			if comboHits == 0 then
+				hud.frame.Visible = false
+			end
+		end)
+	elseif gained then
+		hud.frame.Visible = true
+		hud.label.Text = string.format("%d HITS  %d dmg", comboHits, comboDamage)
+		tween(hud.frame, { BackgroundTransparency = 0.25 })
+		tween(hud.stroke, { Transparency = 0.2 })
+		tween(hud.label, { TextTransparency = 0 })
+	end
+end
+
+---Disable smoke and dust emitters as they spawn.
+---@param instance Instance
+local function onDescendantAdded(instance)
+	if not Settings.noSmoke or not instance:IsA("ParticleEmitter") then
+		return
+	end
+
+	local name = instance.Name:lower()
+	if name:find("smoke") or name:find("dust") then
+		instance.Enabled = false
+	end
+end
+
+---Deep copy a recorded argument table; instances and enums are kept as they are.
+---@param value any
+---@return any
+function Bot.copy(value)
+	if type(value) ~= "table" then
+		return value
+	end
+
+	local out = {}
+	for key, inner in pairs(value) do
+		out[key] = Bot.copy(inner)
+	end
+
+	return out
+end
+
+---Turn a recorded value into something JSON can hold.
+---@param value any
+---@return any
+function Bot.encode(value)
+	local kind = typeof(value)
+	if kind == "EnumItem" then
+		return { __enum = tostring(value) }
+	elseif kind == "Vector3" then
+		return { __v3 = { value.X, value.Y, value.Z } }
+	elseif kind == "CFrame" then
+		return { __cf = { value:GetComponents() } }
+	elseif kind == "Instance" then
+		return { __inst = value:GetFullName() }
+	elseif kind == "table" then
+		local out = {}
+		if #value > 0 then
+			for _, inner in ipairs(value) do
+				table.insert(out, Bot.encode(inner))
+			end
+			return out
+		end
+
+		for key, inner in pairs(value) do
+			out[tostring(key)] = Bot.encode(inner)
+		end
+		return out
+	elseif kind == "number" or kind == "string" or kind == "boolean" then
+		return value
+	end
+
+	return nil
+end
+
+---Turn a saved value back into the real thing.
+---@param value any
+---@return any
+function Bot.decode(value)
+	if type(value) ~= "table" then
+		return value
+	end
+
+	if value.__enum then
+		local parts = string.split(value.__enum, ".")
+		local ok, item = pcall(function()
+			return Enum[parts[2]][parts[3]]
+		end)
+		return ok and item or nil
+	elseif value.__v3 then
+		return Vector3.new(unpack(value.__v3))
+	elseif value.__cf then
+		return CFrame.new(unpack(value.__cf))
+	elseif value.__inst then
+		local current = game
+		for _, part in ipairs(string.split(value.__inst, ".")) do
+			current = current and current:FindFirstChild(part)
+		end
+		return current
+	end
+
+	local out = {}
+	for key, inner in pairs(value) do
+		out[key] = Bot.decode(inner)
+	end
+
+	return out
+end
+
+---Save recorded combos and the learned strafe style to disk.
+---@return boolean
+function Bot.save()
+	if not (writefile and makefolder) then
+		return false
+	end
+
+	local data = {
+		combos = {},
+		style = Bot.packStyle(Bot.style),
+	}
+
+	for slot, combo in pairs(Bot.combos) do
+		local events = {}
+		for _, event in ipairs(combo.events) do
+			table.insert(events, { t = event.t, args = Bot.encode(event.args) })
+		end
+		data.combos[slot] = { events = events, length = combo.length }
+	end
+
+	data.adapt = Bot.adapt
+
+	return (pcall(function()
+		if isfolder and not isfolder("Zenny") then
+			makefolder("Zenny")
+		end
+		writefile("Zenny/Bot.json", httpService:JSONEncode(data))
+	end))
+end
+
+---Load saved combos and strafe style.
+---@return boolean
+function Bot.load()
+	if not (readfile and isfile) then
+		return false
+	end
+
+	local ok, data = pcall(function()
+		if not isfile("Zenny/Bot.json") then
+			return nil
+		end
+		return httpService:JSONDecode(readfile("Zenny/Bot.json"))
+	end)
+	if not ok or type(data) ~= "table" then
+		return false
+	end
+
+	for slot, combo in pairs(data.combos or {}) do
+		local events = {}
+		for _, event in ipairs(combo.events or {}) do
+			table.insert(events, { t = event.t, args = Bot.decode(event.args) })
+		end
+		Bot.combos[slot] = { events = events, length = combo.length or 0 }
+	end
+
+	if data.style then
+		for key, value in pairs(Bot.unpackStyle(data.style)) do
+			Bot.style[key] = value
+		end
+	end
+
+	for name, entry in pairs(data.adapt or {}) do
+		if type(entry) == "table" and type(entry.techs) == "table" then
+			Bot.adapt[name] = { techs = entry.techs, block = entry.block or 0, aggro = entry.aggro or 0 }
+		end
+	end
+
+	return true
+end
+
+---Turn the script's defensive features on for the bot, or give the old values back.
+---@param on boolean
+function Bot.applyProfile(on)
+	if on then
+		Bot.saved = {}
+		for key, value in pairs(Bot.profile) do
+			Bot.saved[key] = Settings[key]
+			Settings[key] = value
+		end
+	elseif Bot.saved then
+		for key, value in pairs(Bot.saved) do
+			Settings[key] = value
+		end
+		Bot.saved = nil
+	end
+
+	for key in pairs(Bot.profile) do
+		local refresh = uiRefreshers[key]
+		if refresh then
+			refresh(true)
+		end
+	end
+end
+
+---Get the root and humanoid of a living character.
+---@param character Model
+---@return BasePart?, Humanoid?
+function Bot.getParts(character)
+	local root = character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if root and humanoid and humanoid.Health > 0 then
+		return root, humanoid
+	end
+
+	return nil, nil
+end
+
+---Work out how to face for a dash to travel where we want.
+---@param myRoot BasePart
+---@param targetRoot BasePart
+---@param dashKey Enum.KeyCode
+---@param hook boolean|string Curve side dashes in toward the target.
+---@param point Vector3? Aim here instead of at the target.
+---@param human boolean? Blend toward the perfect aim by the assist strength instead of snapping.
+---@param jitter boolean? Add the random wobble; the predictor line leaves it out.
+---@return Vector3?, Vector3?, Vector3?
+function Bot.solveDash(myRoot, targetRoot, dashKey, hook, point, human, jitter)
+	local lead = human and Settings.assistLead or 0.1
+	local predicted = point or (targetRoot.Position + targetRoot.AssemblyLinearVelocity * lead)
+	local offset = (predicted - myRoot.Position) * Vector3.new(1, 0, 1)
+	if offset.Magnitude < 0.1 then
+		return nil
+	end
+
+	local toward = offset.Unit
+	local look = toward
+	local sideSign = dashKey == Enum.KeyCode.D and 1 or -1
+	local side = dashKey == Enum.KeyCode.A or dashKey == Enum.KeyCode.D
+
+	if side then
+		-- Our right vector is (-look.Z, 0, look.X); the dash goes along it or its opposite.
+		local tangent = Vector3.new(-toward.Z, 0, toward.X) * sideSign
+		-- "away" bends outward for a hook; true bends inward for a circle dash.
+		local angle = hook == "away" and -math.rad(Settings.hookAwayAngle) or (hook and math.rad(Settings.hookAngle) or 0)
+		local desired = tangent * math.cos(angle) + toward * math.sin(angle)
+		local right = desired * sideSign
+		look = Vector3.new(right.Z, 0, -right.X)
+	end
+
+	if human then
+		-- Turn part of the way from where we face, never more than the max turn.
+		local current = myRoot.CFrame.LookVector * Vector3.new(1, 0, 1)
+		if current.Magnitude > 0.1 then
+			current = current.Unit
+			local delta = math.atan2(current:Cross(look).Y, current:Dot(look))
+			local turn = math.clamp(delta * Settings.assistStrength / 100, -math.rad(Settings.assistMaxTurn), math.rad(Settings.assistMaxTurn))
+			if jitter then
+				turn += math.rad((math.random() * 2 - 1) * Settings.assistJitter)
+			end
+
+			look = CFrame.Angles(0, turn, 0):VectorToWorldSpace(current)
+		end
+	end
+
+	local travel
+	if side then
+		travel = Vector3.new(-look.Z, 0, look.X) * sideSign
+	elseif dashKey == Enum.KeyCode.S then
+		travel = -look
+	else
+		travel = look
+	end
+
+	return look, travel, predicted
+end
+
+---Rotate our character so a dash of this key travels where we want.
+---@param myRoot BasePart
+---@param targetRoot BasePart
+---@param dashKey Enum.KeyCode
+---@param hook boolean|string Curve side dashes in toward the target.
+---@param point Vector3? Aim here instead of at the target.
+---@param human boolean? Blend instead of snapping.
+function Bot.aimDash(myRoot, targetRoot, dashKey, hook, point, human)
+	local look = Bot.solveDash(myRoot, targetRoot, dashKey, hook, point, human, human)
+	if look then
+		myRoot.CFrame = CFrame.lookAt(myRoot.Position, myRoot.Position + look)
+	end
+end
+
+---Fire a dash of one key aimed at the target, then keep facing them.
+---@param myRoot BasePart
+---@param targetRoot BasePart
+---@param dashKey Enum.KeyCode
+---@param hook boolean|string
+---@param point Vector3?
+---@return boolean
+function Bot.dash(myRoot, targetRoot, dashKey, hook, point)
+	local remote = getRemote()
+	if not remote then
+		return false
+	end
+
+	Bot.aimDash(myRoot, targetRoot, dashKey, hook, point)
+	remote:FireServer({ Dash = dashKey, Key = Enum.KeyCode.Q, Goal = "KeyPress" })
+
+	-- Give the server a moment to read the dash direction before turning back.
+	task.delay(0.06, function()
+		if targetRoot.Parent then
+			startLock(targetRoot, true)
+		end
+	end)
+
+	return true
+end
+
+---Aim the dash the player just pressed; runs inside the remote hook.
+---@param dashKey Enum.KeyCode
+function Bot.assistFire(dashKey)
+	local kind
+	if dashKey == Enum.KeyCode.W then
+		kind = Settings.assistFront
+	elseif dashKey == Enum.KeyCode.S then
+		kind = Settings.assistBack
+	elseif dashKey == Enum.KeyCode.A or dashKey == Enum.KeyCode.D then
+		kind = Settings.assistSide
+	end
+
+	local myRoot, targetRoot = Bot.myRoot, Bot.assistRoot
+	if not (myRoot and targetRoot and myRoot.Parent and targetRoot.Parent) then
+		return
+	end
+
+	local flat = ((targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+
+	-- A front dash close to someone locks on to them for a moment.
+	if dashKey == Enum.KeyCode.W and Settings.frontLock and flat <= Settings.frontLockRange then
+		Bot.engageFrontLock(targetRoot.Parent)
+	end
+
+	if kind then
+		-- Close dashes circle around them; far ones are long arms and stay straight.
+		Bot.aimDash(myRoot, targetRoot, dashKey, Settings.assistHook and flat <= Settings.hookRange, nil, true)
+	end
+end
+
+---Lock on to someone for a short while after a close front dash.
+---@param character Model?
+function Bot.engageFrontLock(character)
+	if not character then
+		return
+	end
+
+	if not Bot.lockOn then
+		Bot.frontLockAuto = true
+		Bot.lockOn = true
+	end
+
+	Bot.lockTarget = character
+	Bot.frontLockUntil = os.clock() + Settings.frontLockTime
+end
+
+---Handle one remote the game fires: dash assist, style counting and combo recording.
+---@param remote Instance
+function Bot.onRemote(remote, ...)
+	if remote.Name ~= "Communicate" then
+		return
+	end
+
+	local args = ...
+	if type(args) ~= "table" then
+		return
+	end
+
+	Bot.measure(args)
+
+	if args.Goal == "LeftClick" then
+		Bot.selfLastM1 = os.clock()
+	end
+
+	if args.Dash and args.Goal == "KeyPress" then
+		Bot.countOwnDash(args.Dash)
+		Bot.assistFire(args.Dash)
+	end
+
+	local recording = Bot.recording
+	if not recording or Bot.ignoredGoals[args.Goal] or #recording.events >= 150 then
+		return
+	end
+
+	local now = os.clock()
+	recording.start = recording.start or now
+	recording.lastAt = now
+	table.insert(recording.events, { t = now - recording.start, args = Bot.copy(args) })
+end
+
+---Hook FireServer once so we can see the game's own input remote calls.
+function Bot.installHook()
+	shared.ZennyRecord = Bot.onRemote
+
+	if shared.ZennyHooked or not (hookmetamethod and getnamecallmethod and newcclosure) then
+		return
+	end
+
+	local old
+	old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+		local method = getnamecallmethod()
+		local record = shared.ZennyRecord
+		if record and method == "FireServer" and not checkcaller() then
+			pcall(record, self, ...)
+			if setnamecallmethod then
+				setnamecallmethod(method)
+			end
+		end
+
+		return old(self, ...)
+	end))
+	shared.ZennyHooked = true
+end
+
+---Start recording the next inputs the player sends into the selected combo slot.
+function Bot.startRecording()
+	if not shared.ZennyHooked then
+		log("combo: remote hook missing, cannot record")
+		return
+	end
+
+	Bot.recording = { slot = Settings.comboSlot, events = {}, startedAt = os.clock() }
+	log("recording " .. Settings.comboSlot .. ": do your combo now")
+end
+
+---Finish recording and store the combo.
+function Bot.stopRecording()
+	local recording = Bot.recording
+	Bot.recording = nil
+	if not recording then
+		return
+	end
+
+	if #recording.events == 0 then
+		log("combo: nothing recorded")
+		return
+	end
+
+	local length = recording.events[#recording.events].t
+	Bot.combos[recording.slot] = { events = recording.events, length = length }
+	log(string.format("%s saved: %d inputs, %.2fs", recording.slot, #recording.events, length))
+end
+
+---Stop recording after the player goes quiet.
+---@param now number
+function Bot.updateRecording(now)
+	local recording = Bot.recording
+	if not recording then
+		return
+	end
+
+	if #recording.events > 0 and now - recording.lastAt > 2.5 then
+		Bot.stopRecording()
+	elseif #recording.events == 0 and now - recording.startedAt > 20 then
+		Bot.recording = nil
+		log("combo: recording timed out")
+	end
+end
+
+---Point mouse-style arguments at the target.
+---@param args table
+---@param targetRoot BasePart
+function Bot.retarget(args, targetRoot)
+	for key, value in pairs(args) do
+		local name = type(key) == "string" and key:lower() or ""
+		if name:find("mouse", 1, true) or name:find("hit", 1, true) or name:find("pos", 1, true) then
+			local kind = typeof(value)
+			if kind == "CFrame" then
+				args[key] = CFrame.new(targetRoot.Position)
+			elseif kind == "Vector3" then
+				args[key] = targetRoot.Position
+			end
+		end
+	end
+end
+
+Bot.reasonSlots = { punish = "Punish", poke = "Poke", ragdoll = "Ragdoll", guard = "Guard Break" }
+
+---Pick which combo slot to use next.
+---@param reason string? "punish" or "poke" prefers the slot taught for it.
+---@return string?
+function Bot.pickCombo(reason)
+	local special = Bot.reasonSlots[reason]
+	local taught = special and Bot.combos[special]
+	if taught and #taught.events > 0 then
+		return special
+	end
+
+	-- Never run a normal combo into a guard.
+	if reason == "guard" then
+		return nil
+	end
+
+	local selected = Bot.combos[Settings.comboSlot]
+	if Settings.comboUseMode == "Selected" then
+		return selected and #selected.events > 0 and Settings.comboSlot or nil
+	end
+
+	for step = 1, #Bot.slots do
+		local index = (Bot.comboIndex + step - 1) % #Bot.slots + 1
+		local combo = Bot.combos[Bot.slots[index]]
+		if combo and #combo.events > 0 then
+			Bot.comboIndex = index
+			return Bot.slots[index]
+		end
+	end
+
+	return nil
+end
+
+---Replay a recorded combo on a target with the original timing.
+---@param slot string
+---@param targetRoot BasePart
+---@return boolean
+function Bot.playCombo(slot, targetRoot)
+	local combo = Bot.combos[slot]
+	if not combo or #combo.events == 0 or Bot.comboRun or Bot.recording or not getRemote() then
+		return false
+	end
+
+	local run = { slot = slot, down = {} }
+	Bot.comboRun = run
+	log("combo: playing " .. slot)
+
+	task.spawn(function()
+		local startedAt = os.clock()
+
+		for _, event in ipairs(combo.events) do
+			local delay = startedAt + event.t - os.clock()
+			if delay > 0 then
+				task.wait(delay)
+			end
+
+			local _, myRoot, myHumanoid = getMe()
+			local remote = getRemote()
+			local blocked = Settings.comboCancel and (blockDown or os.clock() < blockUntil)
+			if run.cancel or blocked or not (remote and myRoot and myHumanoid) or myHumanoid.Health <= 0 or not targetRoot.Parent then
+				if blocked then
+					log("combo: cancelled to block")
+				end
+				break
+			end
+
+			startLock(targetRoot, true)
+			updateLock(myRoot, true)
+
+			local args = Bot.copy(event.args)
+			Bot.retarget(args, targetRoot)
+			if args.Key and args.Goal == "KeyPress" then
+				run.down[args.Key] = true
+			elseif args.Key and args.Goal == "KeyRelease" then
+				run.down[args.Key] = nil
+			end
+
+			remote:FireServer(args)
+		end
+
+		-- Let go of anything the combo left held.
+		local remote = getRemote()
+		if remote then
+			for key in pairs(run.down) do
+				remote:FireServer({ Goal = "KeyRelease", Key = key })
+			end
+		end
+
+		Bot.comboRun = nil
+		if Bot.active and Settings.botStyle == "Competitive" and Bot.mode == "PRESSURE" then
+			Bot.endPressure(os.clock())
+		end
+	end)
+
+	return true
+end
+
+---Feed one movement sample of a subject against an opponent into the strafe style.
+---@param subject BasePart
+---@param opponent BasePart
+---@param now number
+---@param memo table
+---@param style table? The style to add to; ours by default.
+function Bot.observe(subject, opponent, now, memo, style)
+	local lastAt = memo.at
+	local lastPosition = memo.position
+	memo.at, memo.position = now, subject.Position
+	if not lastAt or now - lastAt > 0.5 then
+		memo.sign = nil
+		return
+	end
+
+	local dt = now - lastAt
+	local velocity = (subject.Position - lastPosition) / dt * Vector3.new(1, 0, 1)
+	local offset = (opponent.Position - subject.Position) * Vector3.new(1, 0, 1)
+	local distance = offset.Magnitude
+
+	-- Dashes are far faster than walking; they are not strafing.
+	if distance < 2 or distance > 35 or velocity.Magnitude > 35 then
+		memo.sign = nil
+		return
+	end
+
+	local direction = offset.Unit
+	local tangent = Vector3.new(-direction.Z, 0, direction.X)
+	local sideSpeed = velocity:Dot(tangent)
+	local inSpeed = velocity:Dot(direction)
+	style = style or Bot.style
+
+	style.time += dt
+	local bucket = math.floor(distance + 0.5)
+	style.dist[bucket] = (style.dist[bucket] or 0) + dt
+
+	-- A strafe segment is the time spent moving one way before switching.
+	local sign = math.abs(sideSpeed) > 5 and (sideSpeed > 0 and 1 or -1) or 0
+	if sign ~= 0 then
+		if memo.sign == sign then
+			memo.duration += dt
+		else
+			if memo.sign and memo.duration >= 0.12 and memo.duration <= 3 then
+				table.insert(style.segments, memo.duration)
+				if #style.segments > 200 then
+					table.remove(style.segments, 1)
+				end
+			end
+			memo.sign, memo.duration = sign, 0
+		end
+	end
+
+	-- A poke is a fast step in from outside the neutral spacing.
+	if inSpeed > 10 and distance > 6 then
+		if not memo.poking then
+			style.pokes += 1
+			memo.poking = true
+		end
+	elseif inSpeed < 3 then
+		memo.poking = false
+	end
+end
+
+---Learn from our own movement and from a studied player.
+---@param myRoot BasePart
+---@param now number
+function Bot.updateStudy(myRoot, now)
+	local learnSelf = Bot.learningSelf()
+	if not (learnSelf or Bot.studySubject) or now - Bot.studyAt < 0.1 then
+		return
+	end
+	Bot.studyAt = now
+
+	if learnSelf then
+		local opponent = Bot.lockTarget and Bot.lockTarget:FindFirstChild("HumanoidRootPart") or getNearestTarget(myRoot, 35)
+		Bot.selfOpponent, Bot.selfOpponentAt = opponent, now
+		if opponent then
+			Bot.observe(myRoot, opponent, now, Bot.selfMemo)
+		end
+	end
+
+	local subject = Bot.studySubject
+	if not subject then
+		return
+	end
+
+	local subjectRoot = subject.Parent and subject:FindFirstChild("HumanoidRootPart")
+	if not subjectRoot then
+		Bot.studySubject = nil
+		log("study: subject left")
+		return
+	end
+
+	-- They are fighting whoever is closest to them, which may be us.
+	local opponent, closest = nil, 35
+	local container = workspace:FindFirstChild("Live") or workspace
+	for _, character in ipairs(container:GetChildren()) do
+		local root = character ~= subject and character:IsA("Model") and character:FindFirstChild("HumanoidRootPart")
+		if root then
+			local distance = (root.Position - subjectRoot.Position).Magnitude
+			if distance < closest then
+				opponent, closest = root, distance
+			end
+		end
+	end
+
+	if opponent then
+		Bot.observe(subjectRoot, opponent, now, Bot.subjectMemo)
+	end
+end
+
+---Get the neutral spacing band: perfect spacing keeps them just outside their reach.
+---@return number, number
+function Bot.getSpacing()
+	if Settings.spacePerfect then
+		local low = Settings.spaceTiles * Bot.tile - 1 + Bot.spaceBonus
+		return low, low + 3
+	end
+
+	local style = Bot.activeStyle()
+	if Settings.styleUse and style.time >= 15 then
+		local first = math.ceil(Settings.botReach) + 1
+		local total = 0
+		for bucket = first, 35 do
+			total += style.dist[bucket] or 0
+		end
+
+		if total >= 8 then
+			local low, high, sum = nil, nil, 0
+			for bucket = first, 35 do
+				sum += style.dist[bucket] or 0
+				if not low and sum >= total * 0.25 then
+					low = bucket
+				end
+				if not high and sum >= total * 0.75 then
+					high = bucket
+					break
+				end
+			end
+
+			if low and high then
+				return low, math.max(high, low + 2)
+			end
+		end
+	end
+
+	return Settings.spaceMin, math.max(Settings.spaceMax, Settings.spaceMin + 1)
+end
+
+---How long to strafe one way, sampled from what was learned.
+---@return number
+function Bot.strafeTime()
+	local segments = Bot.activeStyle().segments
+	if Settings.styleUse and #segments >= 8 then
+		return segments[math.random(#segments)]
+	end
+
+	return 0.35 + math.random() * 0.75
+end
+
+---Seconds between pokes.
+---@return number
+function Bot.pokeInterval()
+	local style = Bot.activeStyle()
+	if Settings.styleUse and style.time >= 20 and style.pokes >= 3 then
+		return math.clamp(style.time / style.pokes, 1, 8)
+	end
+
+	return Settings.pokeEvery
+end
+
+---Seconds between neutral side dashes.
+---@return number
+function Bot.sideInterval()
+	local style = Bot.activeStyle()
+	if Settings.styleUse and style.time >= 20 and style.dashes >= 3 then
+		return math.clamp(style.time / style.dashes, 1.2, 8)
+	end
+
+	return 2.2 + math.random() * 2
+end
+
+---Leave the pressure phase: step back, then go back to spacing.
+---@param now number
+function Bot.endPressure(now)
+	Bot.mode = "RESET"
+	Bot.modeUntil = now + 0.5
+	Bot.resetPending = true
+	Bot.resetAt = now + Settings.backStepDelay
+	Bot.hits = 0
+	Bot.nextPoke = now + Bot.pokeInterval() * (0.7 + math.random() * 0.6)
+end
+
+---Check that a character is still a valid lock target.
+---@param character Model
+---@param myRoot BasePart
+---@return boolean
+function Bot.validLock(character, myRoot)
+	if not character.Parent then
+		return false
+	end
+
+	local root = Bot.getParts(character)
+	return root ~= nil and (root.Position - myRoot.Position).Magnitude <= Settings.lockRange * 1.3
+end
+
+---Choose a lock target, best aligned with the camera first.
+---@param myCharacter Model
+---@param myRoot BasePart
+---@param cycle boolean Move on to the next candidate.
+---@return Model?
+function Bot.pickLock(myCharacter, myRoot, cycle)
+	local camera = workspace.CurrentCamera
+	local origin = camera and camera.CFrame.Position or myRoot.Position
+	local look = camera and camera.CFrame.LookVector or myRoot.CFrame.LookVector
+	local list = {}
+	local container = workspace:FindFirstChild("Live") or workspace
+
+	for _, character in ipairs(container:GetChildren()) do
+		if character == myCharacter or not character:IsA("Model") or isIgnored(character) then
+			continue
+		end
+
+		if Settings.botPlayersOnly and not playersService:GetPlayerFromCharacter(character) then
+			continue
+		end
+
+		local root = Bot.getParts(character)
+		if not root then
+			continue
+		end
+
+		local offset = root.Position - origin
+		local distance = (root.Position - myRoot.Position).Magnitude
+		if distance <= Settings.lockRange and offset.Magnitude > 0 then
+			local angle = math.acos(math.clamp(look:Dot(offset.Unit), -1, 1))
+			table.insert(list, { character = character, score = angle + distance / Settings.lockRange * 0.3 })
+		end
+	end
+
+	if #list == 0 then
+		return nil
+	end
+
+	table.sort(list, function(a, b)
+		return a.score < b.score
+	end)
+
+	if cycle and Bot.lockTarget then
+		for index, item in ipairs(list) do
+			if item.character == Bot.lockTarget then
+				return list[index % #list + 1].character
+			end
+		end
+	end
+
+	return list[1].character
+end
+
+---Turn the lock on or off.
+---@param on boolean
+function Bot.setLock(on)
+	Bot.frontLockAuto = false
+	Bot.frontLockUntil = nil
+	Bot.lockOn = on
+	if on then
+		local myCharacter, myRoot = getMe()
+		Bot.lockTarget = myRoot and Bot.pickLock(myCharacter, myRoot, false) or nil
+		log("lock on: " .. (Bot.lockTarget and Bot.lockTarget.Name or "no target"))
+		return
+	end
+
+	Bot.lockTarget = nil
+	if not Bot.active then
+		stopLock()
+	end
+	log("lock off")
+end
+
+---Switch the lock to the next target.
+function Bot.cycleLock()
+	local myCharacter, myRoot = getMe()
+	if not myRoot then
+		return
+	end
+
+	Bot.lockOn = true
+	Bot.lockTarget = Bot.pickLock(myCharacter, myRoot, true)
+	log("lock: " .. (Bot.lockTarget and Bot.lockTarget.Name or "no target"))
+end
+
+---Keep the lock target valid and face it while we play by hand.
+---@param myCharacter Model
+---@param myRoot BasePart
+---@param now number
+function Bot.updateLockTarget(myCharacter, myRoot, now)
+	if not Bot.lockOn then
+		return
+	end
+
+	if not Bot.lockTarget or not Bot.validLock(Bot.lockTarget, myRoot) then
+		Bot.lockTarget = nil
+		if now - Bot.lockPickAt > 0.25 then
+			Bot.lockPickAt = now
+			Bot.lockTarget = Bot.pickLock(myCharacter, myRoot, false)
+		end
+	end
+
+	local root = Bot.lockTarget and Bot.getParts(Bot.lockTarget)
+	if root and not Bot.active and Settings.lockFaceChar and not techBusy then
+		startLock(root, true)
+	end
+end
+
+---Turn the camera toward the lock target; runs every render step.
+---@param delta number
+function Bot.updateCamera(delta)
+	if not Bot.lockOn or not Settings.lockCamera or not Bot.lockTarget then
+		return
+	end
+
+	local camera = workspace.CurrentCamera
+	local root = Bot.lockTarget.Parent and Bot.lockTarget:FindFirstChild("HumanoidRootPart")
+	if not camera or not root then
+		return
+	end
+
+	local aim = root.Position + Vector3.new(0, 1, 0)
+	if Settings.lockPredict then
+		aim += root.AssemblyLinearVelocity * 0.05
+	end
+
+	-- Orbit the camera's focus so the zoom distance is kept.
+	local focus = camera.Focus.Position
+	local direction = aim - focus
+	if direction.Magnitude < 0.1 then
+		return
+	end
+
+	local zoom = (camera.CFrame.Position - focus).Magnitude
+	local goal = CFrame.lookAt(focus - direction.Unit * zoom, focus)
+	camera.CFrame = camera.CFrame:Lerp(goal, math.clamp(delta * Settings.lockSpeed, 0, 1))
+end
+
+---Pick who the dash assist aims at.
+---@param myRoot BasePart
+function Bot.updateAssistTarget(myRoot)
+	if not (Settings.assistSide or Settings.assistFront or Settings.assistBack or Settings.frontLock or Settings.assistLines) then
+		Bot.assistRoot = nil
+		return
+	end
+
+	-- A double tapped player comes first, then the lock, then whoever is nearest.
+	local tapRoot = Bot.tapTarget and Bot.tapTarget.Parent and Bot.getParts(Bot.tapTarget)
+	if tapRoot and (tapRoot.Position - myRoot.Position).Magnitude <= Settings.assistRange * 2 then
+		Bot.assistRoot = tapRoot
+		return
+	end
+
+	local lockRoot = Bot.lockOn and Bot.lockTarget and Bot.getParts(Bot.lockTarget)
+	Bot.assistRoot = lockRoot or getNearestTarget(myRoot, Settings.assistRange)
+end
+
+---Double tap a player's body to make them the side dash assist target; double tap them again or empty space to clear.
+---@param input InputObject
+---@param processed boolean
+function Bot.onTap(input, processed)
+	if processed or not Settings.tapTarget then
+		return
+	end
+
+	local kind = input.UserInputType
+	if kind ~= Enum.UserInputType.Touch and kind ~= Enum.UserInputType.MouseButton1 then
+		return
+	end
+
+	local now = os.clock()
+	local position = Vector2.new(input.Position.X, input.Position.Y)
+	local last = Bot.lastTap
+	Bot.lastTap = { t = now, position = position }
+	if not last or now - last.t > 0.4 or (position - last.position).Magnitude > 45 then
+		return
+	end
+
+	Bot.lastTap = nil
+	Bot.pickTapTarget(position)
+end
+
+---Choose the player whose body is nearest a screen point.
+---@param position Vector2
+function Bot.pickTapTarget(position)
+	local camera = workspace.CurrentCamera
+	local myCharacter = getMe()
+	if not camera then
+		return
+	end
+
+	local container = workspace:FindFirstChild("Live") or workspace
+	local best, bestDistance = nil, 90
+
+	for _, character in ipairs(container:GetChildren()) do
+		if character == myCharacter or not character:IsA("Model") or isIgnored(character) then
+			continue
+		end
+
+		local root = Bot.getParts(character)
+		if not root then
+			continue
+		end
+
+		for _, part in ipairs({ root, character:FindFirstChild("Head") }) do
+			local screen, onScreen = camera:WorldToScreenPoint(part.Position)
+			if onScreen then
+				local distance = (Vector2.new(screen.X, screen.Y) - position).Magnitude
+				if distance < bestDistance then
+					best, bestDistance = character, distance
+				end
+			end
+		end
+	end
+
+	if best and best ~= Bot.tapTarget then
+		Bot.tapTarget = best
+		log("assist target: " .. best.Name)
+	else
+		Bot.tapTarget = nil
+		log("assist target: cleared")
+	end
+end
+
+---Create one world line or marker for the assist display.
+---@param className string
+---@param color Color3
+---@return Instance
+function Bot.makeAdornment(className, color)
+	local adornment = newInstance(className, {
+		Color3 = color,
+		Transparency = 0.15,
+		AlwaysOnTop = true,
+		ZIndex = 5,
+		Visible = false,
+	}, holder)
+	if className == "SphereHandleAdornment" then
+		adornment.Radius = 0.7
+	end
+
+	return adornment
+end
+
+---Stretch a line adornment between two world points.
+---@param line BoxHandleAdornment
+---@param root BasePart
+---@param from Vector3
+---@param to Vector3
+function Bot.placeLine(line, root, from, to)
+	local delta = to - from
+	if delta.Magnitude < 0.2 then
+		line.Visible = false
+		return
+	end
+
+	line.Adornee = root
+	line.Size = Vector3.new(0.14, 0.14, delta.Magnitude)
+	line.CFrame = root.CFrame:ToObjectSpace(CFrame.lookAt(from + delta / 2, to))
+	line.Visible = true
+end
+
+---Put a sphere marker at a world point.
+---@param marker SphereHandleAdornment
+---@param root BasePart
+---@param point Vector3
+function Bot.placeMarker(marker, root, point)
+	marker.Adornee = root
+	marker.CFrame = root.CFrame:ToObjectSpace(CFrame.new(point))
+	marker.Visible = true
+end
+
+---Draw the aim line and the pink predicted dash paths; runs every render step.
+function Bot.updateLines()
+	local lines = Bot.lines
+	local myRoot, targetRoot = Bot.myRoot, Bot.assistRoot
+	local pink = Color3.fromRGB(255, 105, 200)
+
+	-- Mark the double tapped player.
+	local tapped = Bot.tapTarget
+	if tapped and (not tapped.Parent or not Bot.getParts(tapped)) then
+		Bot.tapTarget = nil
+		tapped = nil
+	end
+	if tapped and Settings.assistLines then
+		if not Bot.tapMarker then
+			Bot.tapMarker = newInstance("Highlight", {
+				FillTransparency = 1,
+				OutlineColor = pink,
+				OutlineTransparency = 0.1,
+				DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+			}, holder)
+		end
+		Bot.tapMarker.Adornee = tapped
+	elseif Bot.tapMarker then
+		Bot.tapMarker:Destroy()
+		Bot.tapMarker = nil
+	end
+
+	local show = Settings.assistLines and Settings.assistSide and myRoot and targetRoot and myRoot.Parent and targetRoot.Parent
+	if not show then
+		if lines then
+			for _, adornment in pairs(lines) do
+				adornment.Visible = false
+			end
+		end
+		return
+	end
+
+	if not lines or not lines.aim.Parent then
+		lines = {
+			aim = Bot.makeAdornment("BoxHandleAdornment", Color3.fromRGB(255, 255, 255)),
+			aimMark = Bot.makeAdornment("SphereHandleAdornment", Color3.fromRGB(255, 255, 255)),
+			pathA = Bot.makeAdornment("BoxHandleAdornment", pink),
+			pathD = Bot.makeAdornment("BoxHandleAdornment", pink),
+			endA = Bot.makeAdornment("SphereHandleAdornment", pink),
+			endD = Bot.makeAdornment("SphereHandleAdornment", pink),
+		}
+		lines.aim.Transparency = 0.45
+		lines.aimMark.Radius = 0.45
+		Bot.lines = lines
+	end
+
+	-- White line from us to where the assist is aiming (their predicted spot).
+	local from = myRoot.Position
+	local predicted = targetRoot.Position + targetRoot.AssemblyLinearVelocity * Settings.assistLead
+	Bot.placeLine(lines.aim, myRoot, from, predicted)
+	Bot.placeMarker(lines.aimMark, myRoot, predicted)
+
+	-- Which side dashes to preview: the one you are leaning into, or both.
+	local wantA, wantD = true, true
+	local humanoid = Bot.myHumanoid
+	if humanoid then
+		local lateral = humanoid.MoveDirection:Dot(myRoot.CFrame.RightVector)
+		if userInputService:IsKeyDown(Enum.KeyCode.D) or lateral > 0.35 then
+			wantA = false
+		elseif userInputService:IsKeyDown(Enum.KeyCode.A) or lateral < -0.35 then
+			wantD = false
+		end
+	end
+
+	local flat = ((targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+	local hook = Settings.assistHook and flat <= Settings.hookRange
+	for _, info in ipairs({ { Enum.KeyCode.A, wantA, lines.pathA, lines.endA }, { Enum.KeyCode.D, wantD, lines.pathD, lines.endD } }) do
+		local _, travel = Bot.solveDash(myRoot, targetRoot, info[1], hook, nil, true, false)
+		if info[2] and travel then
+			local finish = from + travel * Settings.assistDashLength
+			Bot.placeLine(info[3], myRoot, from, finish)
+			Bot.placeMarker(info[4], myRoot, finish)
+		else
+			info[3].Visible = false
+			info[4].Visible = false
+		end
+	end
+end
+
+---Keep facing the target through our own dash and M1 at the end of it.
+---@param kind string
+---@param track AnimationTrack
+function Bot.onOwnDash(kind, track)
+	local enabled = (kind == "FRONT" and Settings.assistFront) or (kind == "BACK" and Settings.assistBack) or ((kind == "LEFT" or kind == "RIGHT") and Settings.assistSide)
+	local targetRoot = Bot.assistRoot
+	local _, myRoot = getMe()
+	if not enabled or Bot.assistBusy or not (targetRoot and myRoot) then
+		return
+	end
+
+	Bot.assistBusy = true
+	task.spawn(function()
+		local startedAt = os.clock()
+		local length = track.Length > 0 and track.Length or 0.4
+
+		while os.clock() - startedAt < length + Settings.assistTail and targetRoot.Parent and myRoot.Parent do
+			startLock(targetRoot, true)
+			runService.Heartbeat:Wait()
+		end
+
+		Bot.assistBusy = false
+		if not Settings.assistM1 or not (targetRoot.Parent and myRoot.Parent) then
+			return
+		end
+
+		local flat = ((targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+		local blocking = blockDown or heldBlocks > 0 or os.clock() < blockUntil
+		if flat <= Settings.botReach + 2 and not blocking and not isCountering(targetRoot.Parent) then
+			updateLock(myRoot, true)
+			clickM1("dash assist")
+		end
+	end)
+end
+
+---Pick the enemy the bot should fight.
+---@param myCharacter Model
+---@param myRoot BasePart
+---@return Model?, BasePart?, Humanoid?
+function Bot.findTarget(myCharacter, myRoot)
+	local best, bestRoot, bestHumanoid, bestScore = nil, nil, nil, math.huge
+	local container = workspace:FindFirstChild("Live") or workspace
+
+	for _, character in ipairs(container:GetChildren()) do
+		if character == myCharacter or not character:IsA("Model") or isIgnored(character) then
+			continue
+		end
+
+		if Settings.botPlayersOnly and not playersService:GetPlayerFromCharacter(character) then
+			continue
+		end
+
+		local root, humanoid = Bot.getParts(character)
+		if not root then
+			continue
+		end
+
+		local distance = (root.Position - myRoot.Position).Magnitude
+		if distance > Settings.botRange then
+			continue
+		end
+
+		local score = Settings.botTargetMode == "Lowest HP" and (humanoid.Health + distance * 0.1) or distance
+
+		-- Stick with the current target so the bot does not flip between two.
+		if character == Bot.target then
+			score *= 0.7
+		end
+
+		if score < bestScore then
+			best, bestRoot, bestHumanoid, bestScore = character, root, humanoid, score
+		end
+	end
+
+	return best, bestRoot, bestHumanoid
+end
+
+---The locked target if there is one, otherwise the best fresh target.
+---@param myCharacter Model
+---@param myRoot BasePart
+---@return Model?, BasePart?, Humanoid?
+function Bot.getTarget(myCharacter, myRoot)
+	if Settings.botUseLock and Bot.lockOn and Bot.lockTarget then
+		local root, humanoid = Bot.getParts(Bot.lockTarget)
+		if root then
+			return Bot.lockTarget, root, humanoid
+		end
+	end
+
+	return Bot.findTarget(myCharacter, myRoot)
+end
+
+---Work out where the bot should walk this frame.
+---@param myRoot BasePart
+---@param targetRoot BasePart
+---@param distance number
+---@param retreat boolean
+---@param attacking boolean
+---@param now number
+function Bot.updateMove(myRoot, targetRoot, distance, retreat, attacking, now)
+	if now > Bot.strafeUntil then
+		Bot.strafeSign = -Bot.strafeSign
+		Bot.strafeUntil = now + Bot.strafeTime()
+	end
+
+	-- Aim at where they will be, not where they are.
+	local predicted = targetRoot.Position + targetRoot.AssemblyLinearVelocity * 0.12
+	local offset = (predicted - myRoot.Position) * Vector3.new(1, 0, 1)
+	if offset.Magnitude < 0.1 then
+		Bot.moveVector = Vector3.zero
+		return
+	end
+
+	local direction = offset.Unit
+	local tangent = Vector3.new(-direction.Z, 0, direction.X) * Bot.strafeSign
+	local strafe = Settings.botStrafe and 1 or 0
+	local competitive = Settings.botStyle == "Competitive"
+	local low, high = Bot.getSpacing()
+	local engage = Settings.botEngage
+
+	if retreat or Bot.mode == "RESET" or (competitive and attacking and distance < high) then
+		Bot.moveVector = -direction + tangent * 0.5 * strafe
+	elseif competitive and Bot.mode == "NEUTRAL" then
+		if distance > high + 1 then
+			Bot.moveVector = direction + tangent * 0.4 * strafe
+		elseif distance < low - 1 then
+			Bot.moveVector = -direction + tangent * 0.6 * strafe
+		else
+			local lean = distance > (low + high) / 2 and 0.15 or -0.15
+			Bot.moveVector = tangent * strafe + direction * lean
+		end
+	elseif distance > engage + 1.5 then
+		Bot.moveVector = direction + tangent * 0.15 * strafe
+	elseif distance < engage - 1.5 then
+		Bot.moveVector = -direction * 0.6 + tangent * strafe
+	else
+		Bot.moveVector = tangent * strafe
+	end
+end
+
+---Chance weights for a tech before any results: what the opponent seems to do decides them.
+---@param name string
+---@param entry table
+---@return number
+function Bot.techPrior(name, entry)
+	local block = entry.block or 0
+	local aggro = entry.aggro or 0
+	if name == "bullet" then
+		return 0.45 + 0.2 * (1 - block)
+	elseif name == "skibidi" then
+		return 0.5 + 0.25 * block
+	elseif name == "circle" then
+		return 0.5 + 0.15 * block
+	elseif name == "longarm" then
+		return 0.35
+	elseif name == "bdc" then
+		return 0.45 + 0.2 * aggro
+	elseif name == "hook" then
+		return 0.5 + 0.2 * aggro
+	elseif name == "back" then
+		return 0.4
+	elseif name == "m1" then
+		return 0.55
+	end
+
+	return 0.5
+end
+
+---Get the adapter's record of an opponent; "*" is everyone together.
+---@param name string
+---@return table
+function Bot.adaptFor(name)
+	local entry = Bot.adapt[name]
+	if not entry then
+		entry = { techs = {}, block = 0, aggro = 0 }
+		Bot.adapt[name] = entry
+	end
+
+	return entry
+end
+
+---Pick a tech from the candidates, favoring what has worked on this opponent lately.
+---@param candidates string[]
+---@param targetName string
+---@return string
+function Bot.chooseTech(candidates, targetName)
+	if #candidates == 1 then
+		return candidates[1]
+	end
+
+	local entry = Bot.adaptFor(targetName)
+	local everyone = Bot.adaptFor("*")
+	local share = Bot.hookShare()
+	local weights, total = {}, 0
+
+	for index, name in ipairs(candidates) do
+		local weight = 1
+		if Settings.adapterOn then
+			local prior = Bot.techPrior(name, entry)
+			local global = everyone.techs[name]
+			if global and global.tries >= 2 then
+				prior = (prior + (global.wins + 1) / (global.tries + 2)) / 2
+			end
+
+			local stat = entry.techs[name] or { tries = 0, wins = 0 }
+			weight = 0.15 + (stat.wins + prior * 2) / (stat.tries + 2)
+		end
+
+		-- What was learned about how often players hook instead of backing off.
+		if name == "hook" then
+			weight *= 0.5 + share
+		elseif name == "back" then
+			weight *= 1.5 - share
+		end
+
+		weights[index] = weight
+		total += weight
+	end
+
+	if Settings.adapterOn and math.random() < 0.15 then
+		return candidates[math.random(#candidates)]
+	end
+
+	local roll = math.random() * total
+	for index, name in ipairs(candidates) do
+		roll -= weights[index]
+		if roll <= 0 then
+			return name
+		end
+	end
+
+	return candidates[#candidates]
+end
+
+---Store how a tech did against an opponent; old results fade so the adapter follows the present.
+---@param targetName string
+---@param name string
+---@param success boolean
+function Bot.recordTech(targetName, name, success)
+	for _, key in ipairs({ targetName, "*" }) do
+		local entry = Bot.adaptFor(key)
+		local stat = entry.techs[name]
+		if not stat then
+			stat = { tries = 0, wins = 0 }
+			entry.techs[name] = stat
+		end
+
+		stat.tries = stat.tries * 0.9 + 1
+		stat.wins = stat.wins * 0.9 + (success and 1 or 0)
+	end
+
+	Bot.lastTech = name .. (success and " worked" or " failed")
+end
+
+---Start judging a tech: offensive ones need a hit, defensive ones need us to stay unhurt.
+---@param name string
+---@param targetCharacter Model
+---@param targetHumanoid Humanoid
+---@param myHumanoid Humanoid
+---@param now number
+function Bot.beginTech(name, targetCharacter, targetHumanoid, myHumanoid, now)
+	Bot.pendingTech = {
+		name = name,
+		targetName = targetCharacter.Name,
+		humanoid = targetHumanoid,
+		targetHealth = targetHumanoid.Health,
+		myHealth = myHumanoid.Health,
+		startedAt = now,
+		defensive = name == "hook" or name == "back",
+	}
+end
+
+---Settle the tech being judged.
+---@param now number
+---@param myHumanoid Humanoid
+---@param targetHumanoid Humanoid
+function Bot.updateTech(now, myHumanoid, targetHumanoid)
+	local pending = Bot.pendingTech
+	if not pending then
+		return
+	end
+
+	if pending.humanoid ~= targetHumanoid then
+		Bot.pendingTech = nil
+		return
+	end
+
+	if myHumanoid.Health < pending.myHealth - 0.5 then
+		Bot.pendingTech = nil
+		Bot.recordTech(pending.targetName, pending.name, false)
+	elseif not pending.defensive and targetHumanoid.Health < pending.targetHealth - 0.5 then
+		Bot.pendingTech = nil
+		Bot.recordTech(pending.targetName, pending.name, true)
+	elseif now - pending.startedAt >= Settings.techWindow then
+		Bot.pendingTech = nil
+		Bot.recordTech(pending.targetName, pending.name, pending.defensive)
+	end
+end
+
+---Learn how the opponent plays: how much they block and how much they swing.
+---@param targetCharacter Model
+---@param flatDistance number
+---@param attacking boolean
+---@param now number
+function Bot.updateOpponent(targetCharacter, flatDistance, attacking, now)
+	if now - Bot.oppAt < 0.1 then
+		return
+	end
+
+	local dt = math.min(now - Bot.oppAt, 0.5)
+	Bot.oppAt = now
+	if flatDistance > 30 then
+		return
+	end
+
+	-- About a six second memory.
+	local alpha = math.clamp(dt / 6, 0, 1)
+	local entry = Bot.adaptFor(targetCharacter.Name)
+	entry.block += ((isBlocking(targetCharacter) and 1 or 0) - entry.block) * alpha
+	entry.aggro += ((attacking and 1 or 0) - entry.aggro) * alpha
+end
+
+---Run a list of macro steps on a target, giving up if we have to block.
+---@param name string
+---@param steps table
+---@param targetRoot BasePart
+---@return boolean
+function Bot.runMacro(name, steps, targetRoot)
+	if Bot.macroRun or Bot.comboRun then
+		return false
+	end
+
+	local run = { name = name }
+	Bot.macroRun = run
+	log("macro: " .. name)
+
+	task.spawn(function()
+		for _, step in ipairs(steps) do
+			if run.cancel then
+				break
+			end
+
+			if step[1] == "wait" then
+				task.wait(step[2])
+			else
+				local _, myRoot, myHumanoid = getMe()
+				local blocked = Settings.comboCancel and (blockDown or os.clock() < blockUntil)
+				if blocked or not (myRoot and myHumanoid) or myHumanoid.Health <= 0 or not targetRoot.Parent then
+					break
+				end
+
+				if step[1] == "dash" then
+					Bot.dash(myRoot, targetRoot, step[2], step[3])
+				elseif step[1] == "skibidi" then
+					Bot.dash(myRoot, targetRoot, Enum.KeyCode.W, false, Bot.behindPoint(targetRoot))
+				elseif step[1] == "run" then
+					step[2]()
+				end
+			end
+		end
+
+		Bot.macroRun = nil
+	end)
+
+	return true
+end
+
+---A spot behind the target, for the skibidi dash.
+---@param targetRoot BasePart
+---@return Vector3
+function Bot.behindPoint(targetRoot)
+	local look = targetRoot.CFrame.LookVector * Vector3.new(1, 0, 1)
+	local lead = targetRoot.AssemblyLinearVelocity * 0.1
+	return targetRoot.Position + lead - (look.Magnitude > 0.1 and look.Unit or Vector3.zero) * Settings.skibidiOffset
+end
+
+---Which techs fit at this distance.
+---@param flatDistance number
+---@return string[]
+function Bot.approachCandidates(flatDistance)
+	local list = {}
+	if Settings.botHook and flatDistance <= Settings.hookRange then
+		table.insert(list, "circle")
+	end
+
+	if flatDistance >= Settings.bulletMin and flatDistance <= Settings.bulletMax and not isOnCooldown("forward") then
+		if Settings.bulletDash then
+			table.insert(list, "bullet")
+		end
+		if Settings.skibidiDash then
+			table.insert(list, "skibidi")
+		end
+	end
+
+	if Settings.longArm and Bot.longArmOk and flatDistance > Settings.hookRange and flatDistance <= Settings.hookRange * 2.2 then
+		table.insert(list, "longarm")
+	end
+
+	return list
+end
+
+---Perform an approach tech and go into the pressure phase behind it.
+---@param name string
+---@param myRoot BasePart
+---@param targetRoot BasePart
+---@param targetCharacter Model
+---@param targetHumanoid Humanoid
+---@param myHumanoid Humanoid
+---@param flatDistance number
+---@param now number
+function Bot.useTech(name, myRoot, targetRoot, targetCharacter, targetHumanoid, myHumanoid, flatDistance, now)
+	local side = math.random() < 0.5 and Enum.KeyCode.A or Enum.KeyCode.D
+	Bot.nextDash = now + 1.2
+
+	if name == "circle" then
+		Bot.dash(myRoot, targetRoot, side, true)
+	elseif name == "longarm" then
+		Bot.dash(myRoot, targetRoot, side, false)
+	elseif name == "bullet" then
+		Bot.dash(myRoot, targetRoot, Enum.KeyCode.W, false)
+	elseif name == "skibidi" then
+		Bot.dash(myRoot, targetRoot, Enum.KeyCode.W, false, Bot.behindPoint(targetRoot))
+	end
+
+	Bot.mode = "PRESSURE"
+	Bot.modeUntil = now + 2.5
+	Bot.hits = 0
+	Bot.beginTech(name, targetCharacter, targetHumanoid, myHumanoid, now)
+	log(string.format("bot: %s (%d studs)", name, flatDistance))
+end
+
+---Loop dash: circle around them between hits and keep the string going.
+---@param targetRoot BasePart
+---@return boolean
+function Bot.loopMacro(targetRoot)
+	local side = math.random() < 0.5 and Enum.KeyCode.A or Enum.KeyCode.D
+	Bot.nextDash = os.clock() + 1.2
+	return Bot.runMacro("loop dash", {
+		{ "wait", Settings.loopDelay },
+		{ "dash", side, true },
+		{ "wait", Settings.loopFollow },
+	}, targetRoot)
+end
+
+---Backdash cancel: cut the endlag with a back dash, then come back in with a bullet dash.
+---@param targetRoot BasePart
+---@return boolean
+function Bot.bdcMacro(targetRoot)
+	Bot.nextDash = os.clock() + 1.5
+	return Bot.runMacro("backdash cancel", {
+		{ "wait", Settings.cancelDelay },
+		{ "dash", Enum.KeyCode.S, false },
+		{ "wait", Settings.bdcReturn },
+		{
+			"run",
+			function()
+				Bot.mode = "PRESSURE"
+				Bot.modeUntil = os.clock() + 2
+				Bot.hits = 0
+			end,
+		},
+		{ "dash", Enum.KeyCode.W, false },
+	}, targetRoot)
+end
+
+---After a hit: maybe break into a loop dash or a backdash cancel.
+---@param targetCharacter Model
+---@param targetRoot BasePart
+---@param targetHumanoid Humanoid
+---@param myHumanoid Humanoid
+---@param now number
+function Bot.afterHit(targetCharacter, targetRoot, targetHumanoid, myHumanoid, now)
+	if now < Bot.nextDash then
+		return
+	end
+
+	local candidates = {}
+	if Settings.loopDash and Bot.hits == Settings.loopHits then
+		table.insert(candidates, "loop")
+	end
+	if Settings.bdcMacro and Bot.hits == Settings.bdcHits then
+		table.insert(candidates, "bdc")
+	end
+
+	if #candidates == 0 then
+		return
+	end
+
+	table.insert(candidates, "m1")
+	local pick = Bot.chooseTech(candidates, targetCharacter.Name)
+	if pick == "loop" and Bot.loopMacro(targetRoot) or pick == "bdc" and Bot.bdcMacro(targetRoot) then
+		Bot.beginTech(pick, targetCharacter, targetHumanoid, myHumanoid, now)
+	end
+end
+
+---Fight the target: spacing, pressure phases, dashes, macros, combos and M1 strings.
+---@param now number
+---@param myCharacter Model
+---@param myRoot BasePart
+---@param myHumanoid Humanoid
+function Bot.fight(now, myCharacter, myRoot, myHumanoid)
+	local targetCharacter, targetRoot, targetHumanoid = Bot.getTarget(myCharacter, myRoot)
+	Bot.target = targetCharacter
+	if not targetCharacter then
+		Bot.moveVector = Vector3.zero
+		Bot.mode = "NEUTRAL"
+		Bot.status = "No target"
+		return
+	end
+
+	local flatDistance = ((targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+	local distance = (targetRoot.Position - myRoot.Position).Magnitude
+	local hpPercent = myHumanoid.Health / math.max(myHumanoid.MaxHealth, 1) * 100
+	local retreat = Settings.botRetreatHp > 0 and hpPercent < Settings.botRetreatHp
+	local blocking = blockDown or heldBlocks > 0 or now < blockUntil
+	local competitive = Settings.botStyle == "Competitive"
+
+	-- Always face them; the lock also keeps the block pointed at the attacker.
+	startLock(targetRoot, true)
+
+	if isRagdolled(myCharacter, myHumanoid) or techBusy then
+		Bot.moveVector = Vector3.zero
+		Bot.status = "Stunned"
+		if Bot.macroRun then
+			Bot.macroRun.cancel = true
+		end
+		return
+	end
+
+	-- Is the target swinging at us right now?
+	local attacking = false
+	for _, entry in pairs(moves) do
+		if entry.root == targetRoot and entry.threat then
+			attacking = true
+			break
+		end
+	end
+
+	-- Adapt: hits taken while spacing mean the spacing is too tight, so widen it for a while.
+	local health = myHumanoid.Health
+	local dt = math.min(now - Bot.lastTick, 0.2)
+	if Bot.lastTick == 0 then
+		Bot.lastHealth = health
+	end
+	Bot.lastTick = now
+
+	if Settings.adapterOn then
+		if health < Bot.lastHealth - 0.5 and Bot.mode == "NEUTRAL" and not attacking and now - Bot.bonusAt > 1.5 then
+			Bot.spaceBonus = math.min(Bot.spaceBonus + 1, 4)
+			Bot.bonusAt = now
+		end
+		Bot.spaceBonus = math.max(Bot.spaceBonus - 0.1 * dt, 0)
+		Bot.updateOpponent(targetCharacter, flatDistance, attacking, now)
+		Bot.updateTech(now, myHumanoid, targetHumanoid)
+	else
+		Bot.spaceBonus = 0
+		Bot.pendingTech = nil
+	end
+	Bot.lastHealth = health
+
+	-- Phases: hold spacing, step in when they are open or a poke is due, step back out.
+	if not competitive then
+		Bot.mode = "PRESSURE"
+	elseif Bot.mode == "NEUTRAL" then
+		local hurt = now - (enemyHurtAt[targetHumanoid] or -9) < 0.5
+		local whiffed = Settings.punishWhiff and now - (lastMoveEnd[targetRoot] or -9) < Settings.punishWindow
+		local open = whiffed or hurt or isRagdolled(targetCharacter, targetHumanoid)
+
+		if not attacking and not retreat and not blocking and (open or now >= Bot.nextPoke) then
+			Bot.mode = "PRESSURE"
+			Bot.modeUntil = now + 2
+			Bot.hits = 0
+			Bot.reason = open and "punish" or "poke"
+			log(string.format("bot: pressure (%s)", whiffed and "whiff punish" or (open and "open" or "poke")))
+		end
+	elseif Bot.mode == "PRESSURE" then
+		if attacking or retreat or (now > Bot.modeUntil and not Bot.comboRun and not Bot.macroRun) then
+			Bot.endPressure(now)
+		end
+	elseif Bot.mode == "RESET" and now >= Bot.modeUntil then
+		Bot.mode = "NEUTRAL"
+	end
+
+	-- A macro owns the next moments; only blocking can interrupt it.
+	if Bot.macroRun then
+		Bot.moveVector = Vector3.zero
+		Bot.status = "Macro: " .. Bot.macroRun.name
+		return
+	end
+
+	Bot.updateMove(myRoot, targetRoot, distance, retreat, attacking, now)
+	local pressure = Bot.mode == "PRESSURE"
+	local reach = Settings.botReach
+	Bot.rollLongArm(now)
+
+	-- After a string: hook away from them or step straight back, whichever has worked.
+	if Bot.resetPending and now >= Bot.resetAt then
+		Bot.resetPending = false
+		if not blocking and now >= Bot.nextDash and flatDistance < Settings.backStepRange then
+			local candidates = {}
+			if Settings.hookAway then
+				table.insert(candidates, "hook")
+			end
+			if Settings.botBackStep then
+				table.insert(candidates, "back")
+			end
+
+			local pick = #candidates > 0 and Bot.chooseTech(candidates, targetCharacter.Name) or nil
+			if pick == "hook" then
+				Bot.nextDash = now + 0.7
+				Bot.hookUntil = now + 1.5
+				Bot.faded = false
+				Bot.dash(myRoot, targetRoot, math.random() < 0.5 and Enum.KeyCode.A or Enum.KeyCode.D, "away")
+				Bot.beginTech("hook", targetCharacter, targetHumanoid, myHumanoid, now)
+				log("bot: hook away")
+			elseif pick == "back" then
+				Bot.nextDash = now + 1.2
+				Bot.dash(myRoot, targetRoot, Enum.KeyCode.S, false)
+				Bot.beginTech("back", targetCharacter, targetHumanoid, myHumanoid, now)
+			end
+		end
+	end
+
+	-- Fade out of their counter dash after a hook.
+	if Settings.hookFade and not Bot.faded and now < Bot.hookUntil and now >= Bot.nextDash then
+		for _, entry in pairs(dashes) do
+			if entry.root == targetRoot then
+				Bot.faded = true
+				Bot.nextDash = now + 1.2
+				Bot.dash(myRoot, targetRoot, Enum.KeyCode.S, false)
+				log("bot: fade out")
+				break
+			end
+		end
+	end
+
+	-- Close the gap: the tech dash from far away, otherwise bullet, skibidi, circle or long arm.
+	if pressure and not retreat and not blocking and not Bot.comboRun and Settings.botDashIn and now >= Bot.nextDash and flatDistance > reach + 3 then
+		if Settings.botUseTech and flatDistance > Settings.botDashRange and not isOnCooldown("forward") then
+			Bot.nextDash = now + 1.2
+			updateLock(myRoot, true)
+			task.spawn(runTech, myRoot, targetRoot)
+			log(string.format("bot: tech dash (%d studs)", flatDistance))
+		else
+			local candidates = Bot.approachCandidates(flatDistance)
+			if #candidates > 0 then
+				Bot.useTech(Bot.chooseTech(candidates, targetCharacter.Name), myRoot, targetRoot, targetCharacter, targetHumanoid, myHumanoid, flatDistance, now)
+			end
+		end
+	end
+
+	-- Spacing and strafing, then a surprise bullet or skibidi dash out of neutral.
+	if competitive and Bot.mode == "NEUTRAL" and Settings.surprise and not attacking and not blocking and not retreat and now >= Bot.nextSurprise and now >= Bot.nextDash then
+		local candidates = Bot.approachCandidates(flatDistance)
+		if #candidates > 0 then
+			Bot.nextSurprise = now + Settings.surpriseEvery * (0.6 + math.random() * 0.8)
+			Bot.useTech(Bot.chooseTech(candidates, targetCharacter.Name), myRoot, targetRoot, targetCharacter, targetHumanoid, myHumanoid, flatDistance, now)
+			Bot.reason = "poke"
+		end
+	end
+
+	-- Neutral side dashes change the angle without committing.
+	if competitive and Bot.mode == "NEUTRAL" and Settings.neutralDash and not attacking and not blocking and now >= Bot.nextSide and now >= Bot.nextDash and flatDistance > reach + 1 then
+		Bot.nextSide = now + Bot.sideInterval()
+		Bot.nextDash = now + 1.2
+		Bot.dash(myRoot, targetRoot, math.random() < 0.5 and Enum.KeyCode.A or Enum.KeyCode.D, false)
+	end
+
+	-- Recorded combo when they are close enough.
+	if pressure and not blocking and not retreat and not Bot.comboRun and Settings.comboUse and flatDistance <= Settings.comboRange and now >= Bot.comboReadyAt then
+		local reason = competitive and Bot.reason or nil
+		if isBlocking(targetCharacter) then
+			reason = "guard"
+		elseif isRagdolled(targetCharacter, targetHumanoid) then
+			reason = "ragdoll"
+		end
+
+		local slot = Bot.pickCombo(reason)
+		if slot and Bot.playCombo(slot, targetRoot) then
+			Bot.comboReadyAt = now + Settings.comboCooldown
+			Bot.hits = 0
+		end
+	end
+
+	-- M1 string: blocks hold F and F stops M1, so never swing while blocking.
+	local canSwing = pressure and not Bot.comboRun and not blocking and not retreat and flatDistance <= reach and now >= Bot.nextM1
+	if canSwing and Settings.botRespectBlock and isBlocking(targetCharacter) then
+		canSwing = false
+		Bot.status = "Target blocking"
+	elseif canSwing and isCountering(targetCharacter) then
+		canSwing = false
+		Bot.status = "Target countering"
+	end
+
+	if canSwing then
+		if now - Bot.lastM1 > 1 then
+			Bot.hits = 0
+		end
+
+		updateLock(myRoot, true)
+		if clickM1("bot") then
+			Bot.lastM1 = now
+			Bot.hits += 1
+
+			if Bot.hits >= Settings.botStringHits then
+				Bot.hits = 0
+				Bot.nextM1 = now + Settings.botComboPause
+
+				-- A taught finisher ends the string; it ends the pressure phase when it is done.
+				local finisher = competitive and Bot.combos.Finisher
+				if finisher and #finisher.events > 0 and Bot.playCombo("Finisher", targetRoot) then
+					Bot.status = "Finisher"
+				elseif competitive then
+					Bot.endPressure(now)
+				end
+			else
+				Bot.nextM1 = now + Settings.botM1Rate
+				Bot.afterHit(targetCharacter, targetRoot, targetHumanoid, myHumanoid, now)
+			end
+		end
+
+		Bot.status = "Attacking " .. targetCharacter.Name
+	elseif Bot.comboRun then
+		Bot.status = "Combo: " .. Bot.comboRun.slot
+	elseif retreat then
+		Bot.status = "Retreating"
+	elseif blocking then
+		Bot.status = "Blocking"
+	elseif Bot.mode == "NEUTRAL" then
+		Bot.status = "Spacing " .. targetCharacter.Name
+	elseif Bot.mode == "RESET" then
+		Bot.status = "Resetting"
+	elseif flatDistance > reach then
+		Bot.status = "Closing in on " .. targetCharacter.Name
+	end
+end
+
+---Play the selected combo on the lock target or the nearest enemy.
+function Bot.playSelected()
+	local _, myRoot = getMe()
+	local lockRoot = Bot.lockOn and Bot.lockTarget and Bot.getParts(Bot.lockTarget)
+	local targetRoot = lockRoot or (myRoot and getNearestTarget(myRoot, 25))
+	local slot = Bot.pickCombo()
+	if targetRoot and slot then
+		Bot.playCombo(slot, targetRoot)
+	end
+end
+
+Bot.lessons = {
+	{ id = "strafe", name = "Strafe & Spacing", detail = "Fight around a target for 30s", duration = 30 },
+	{ id = "dash", name = "Dash Habits", detail = "Front, circle, long arm and hook for 40s", duration = 40 },
+	{ id = "circle", name = "Circle Dash", detail = "Side dash close to a target for 40s", duration = 40 },
+	{ id = "hookaway", name = "Hook Away", detail = "M1 then side dash away for 40s", duration = 40 },
+	{ id = "punish", name = "Punish Combo", detail = "Record what you do after they miss" },
+	{ id = "poke", name = "Poke Combo", detail = "Record the combo you start with" },
+	{ id = "m1", name = "M1 Rhythm", detail = "M1 a target for 30s: speed, string, reach", duration = 30 },
+	{ id = "back", name = "Back Step Habits", detail = "M1 then back dash for 40s", duration = 40 },
+	{ id = "block", name = "Block Habits", detail = "Block attacks for 40s", duration = 40 },
+	{ id = "escape", name = "Ragdoll Escape", detail = "Get ragdolled and dash out for 60s", duration = 60 },
+	{ id = "ragdoll", name = "Ragdoll Combo", detail = "Record your combo on a ragdolled target" },
+	{ id = "guard", name = "Guard Break", detail = "Record what you do into a blocker" },
+	{ id = "finisher", name = "Finisher", detail = "Record what you do to end a string" },
+	{ id = "combo1", name = "Combo 1", detail = "Record your first custom combo" },
+	{ id = "combo2", name = "Combo 2", detail = "Record your second custom combo" },
+	{ id = "combo3", name = "Combo 3", detail = "Record your third custom combo" },
+	{ id = "combo4", name = "Combo 4", detail = "Record your fourth custom combo" },
+	{ id = "loop", name = "Loop Dash", detail = "M1 then circle dash, repeat, for 40s", duration = 40 },
+	{ id = "bdc", name = "Backdash Cancel", detail = "M1, back dash, then front dash for 40s", duration = 40 },
+	{ id = "bullet", name = "Bullet Dash", detail = "Front dash at a target for 40s", duration = 40 },
+	{ id = "spacing", name = "Perfect Spacing", detail = "Space a target the way you like for 30s", duration = 30 },
+	{ id = "punishtime", name = "Punish Timing", detail = "Punish enemy misses for 60s (needs Auto Block on)", duration = 60 },
+}
+
+---Whether our own movement should feed the strafe style right now.
+---@return boolean
+function Bot.learningSelf()
+	return Settings.styleLearnSelf or (Bot.lesson ~= nil and Bot.lesson.id == "strafe")
+end
+
+---Get the median of a list of numbers.
+---@param list number[]
+---@param fraction number? 0.5 for the median, 0.8 for the 80th percentile.
+---@return number
+function Bot.percentile(list, fraction)
+	local sorted = table.clone(list)
+	table.sort(sorted)
+	return sorted[math.clamp(math.ceil(#sorted * (fraction or 0.5)), 1, #sorted)]
+end
+
+---Flat distance from us to the lesson target, if there is one.
+---@return number?
+function Bot.lessonDistance()
+	local myRoot, targetRoot = Bot.myRoot, Bot.lessonRoot
+	if not (myRoot and targetRoot and targetRoot.Parent) then
+		return nil
+	end
+
+	return ((targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+end
+
+---Take a sample for the running lesson from one input the player sent.
+---@param args table
+function Bot.measure(args)
+	local lesson = Bot.lesson
+	if not lesson or lesson.slot then
+		return
+	end
+
+	local now = os.clock()
+	local id, goal = lesson.id, args.Goal
+
+	if goal == "LeftClick" then
+		lesson.lastClick = now
+	end
+
+	if id == "loop" or id == "bdc" then
+		if goal == "LeftClick" then
+			lesson.streak = (lesson.lastStreak and now - lesson.lastStreak < 0.7) and lesson.streak + 1 or 1
+			lesson.lastStreak = now
+		elseif goal == "KeyPress" and args.Dash then
+			local since = lesson.lastClick and now - lesson.lastClick or nil
+			local key = args.Dash
+			if id == "loop" and (key == Enum.KeyCode.A or key == Enum.KeyCode.D) and since and since < 1 then
+				table.insert(lesson.loops, { since = since, hits = math.max(lesson.streak, 1) })
+			elseif id == "bdc" and key == Enum.KeyCode.S and since and since < 1 then
+				table.insert(lesson.bdcs, { since = since, hits = math.max(lesson.streak, 1) })
+				lesson.backAt = now
+			elseif id == "bdc" and key == Enum.KeyCode.W and lesson.backAt and now - lesson.backAt < 1.5 then
+				table.insert(lesson.returns, now - lesson.backAt)
+				lesson.backAt = nil
+			end
+		end
+	elseif (id == "dash" or id == "circle" or id == "hookaway" or id == "bullet") and args.Dash and goal == "KeyPress" then
+		Bot.measureDash(args.Dash)
+	elseif id == "m1" and goal == "LeftClick" then
+		local distance = Bot.lessonDistance()
+		table.insert(lesson.clicks, { t = now, distance = distance })
+	elseif id == "back" then
+		if goal == "LeftClick" then
+			lesson.lastClick = now
+		elseif args.Dash == Enum.KeyCode.S and goal == "KeyPress" then
+			local distance = Bot.lessonDistance()
+			if distance then
+				table.insert(lesson.backs, { distance = distance, since = lesson.lastClick and now - lesson.lastClick or nil })
+			end
+		end
+	elseif id == "block" and args.Key == BLOCK_KEY then
+		if goal == "KeyPress" then
+			lesson.pressedAt = now
+		elseif goal == "KeyRelease" and lesson.pressedAt then
+			table.insert(lesson.holds, now - lesson.pressedAt)
+			lesson.pressedAt = nil
+		end
+	elseif id == "punishtime" and (goal == "LeftClick" or (args.Dash == Enum.KeyCode.W and goal == "KeyPress")) then
+		local targetRoot = Bot.lessonRoot
+		local endedAt = targetRoot and lastMoveEnd[targetRoot]
+		if endedAt and endedAt ~= lesson.lastPunished and now - endedAt < 1.5 then
+			lesson.lastPunished = endedAt
+			table.insert(lesson.reactions, now - endedAt)
+		end
+	elseif id == "escape" and args.Dash and goal == "KeyPress" and Bot.ragdolled then
+		table.insert(lesson.escapes, { key = args.Dash, t = now })
+	end
+end
+
+---Note where the player dashes relative to the target during the dash lesson.
+---@param dashKey Enum.KeyCode
+function Bot.measureDash(dashKey)
+	local lesson = Bot.lesson
+	local myRoot, targetRoot = Bot.myRoot, Bot.lessonRoot
+	if not lesson or not (myRoot and targetRoot and targetRoot.Parent) then
+		return
+	end
+
+	local offset = (targetRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)
+	if offset.Magnitude < 1 then
+		return
+	end
+
+	if dashKey == Enum.KeyCode.W then
+		if lesson.id == "dash" or lesson.id == "bullet" then
+			table.insert(lesson.front, offset.Magnitude)
+		end
+	elseif dashKey == Enum.KeyCode.A or dashKey == Enum.KeyCode.D then
+		local right = myRoot.CFrame.RightVector * Vector3.new(1, 0, 1)
+		if right.Magnitude < 0.1 then
+			return
+		end
+
+		-- Positive means the dash bends toward the target.
+		local direction = right.Unit * (dashKey == Enum.KeyCode.D and 1 or -1)
+		local inward = math.deg(math.asin(math.clamp(direction:Dot(offset.Unit), -1, 1)))
+		local since = lesson.lastClick and os.clock() - lesson.lastClick or nil
+		table.insert(lesson.sides, { angle = inward, distance = offset.Magnitude, hook = since ~= nil and since < Settings.hookWindow, since = since })
+	end
+end
+
+---Get the median of a list of numbers.
+---@param list number[]
+---@return number
+function Bot.median(list)
+	return Bot.percentile(list, 0.5)
+end
+
+---Push a setting change to its row in the window.
+---@param key string
+function Bot.refreshSetting(key)
+	local refresh = uiRefreshers[key]
+	if refresh then
+		refresh(true)
+	end
+end
+
+---Start a lesson; a new one replaces the running one.
+---@param id string
+function Bot.startLesson(id)
+	Bot.stopLesson()
+
+	local info
+	for _, candidate in ipairs(Bot.lessons) do
+		if candidate.id == id then
+			info = candidate
+		end
+	end
+	if not info then
+		return
+	end
+
+	local now = os.clock()
+	local lesson = {
+		id = id,
+		info = info,
+		startedAt = now,
+		endsAt = info.duration and now + info.duration or nil,
+		baseTime = Bot.style.time,
+		front = {},
+		sides = {},
+		clicks = {},
+		backs = {},
+		holds = {},
+		escapes = {},
+		reactions = {},
+		loops = {},
+		bdcs = {},
+		returns = {},
+		dists = {},
+		streak = 0,
+	}
+
+	local recordSlots = {
+		punish = "Punish",
+		poke = "Poke",
+		ragdoll = "Ragdoll",
+		guard = "Guard Break",
+		finisher = "Finisher",
+		combo1 = "Combo 1",
+		combo2 = "Combo 2",
+		combo3 = "Combo 3",
+		combo4 = "Combo 4",
+	}
+	if recordSlots[id] then
+		lesson.slot = recordSlots[id]
+		lesson.before = Bot.combos[lesson.slot]
+		Settings.comboSlot = lesson.slot
+		Bot.refreshSetting("comboSlot")
+		Bot.startRecording()
+		if not Bot.recording then
+			Bot.lessonResult = "recording needs the remote hook"
+			return
+		end
+	end
+
+	Bot.lesson = lesson
+	Bot.lessonResult = "running"
+	log("lesson started: " .. info.name)
+end
+
+---End the running lesson without learning from it.
+function Bot.stopLesson()
+	local lesson = Bot.lesson
+	Bot.lesson = nil
+	if not lesson then
+		return
+	end
+
+	Bot.lessonResult = "stopped"
+	if lesson.slot and Bot.recording then
+		Bot.stopRecording()
+		local combo = Bot.combos[lesson.slot]
+		if combo ~= lesson.before then
+			Bot.lessonResult = string.format("%s saved: %d inputs, %.1fs", lesson.slot, #combo.events, combo.length)
+		end
+	end
+end
+
+---Stop the lesson, any recording and any combo that is playing.
+function Bot.stopAll()
+	Bot.stopLesson()
+	Bot.stopRecording()
+	if Bot.comboRun then
+		Bot.comboRun.cancel = true
+	end
+	if Bot.macroRun then
+		Bot.macroRun.cancel = true
+	end
+end
+
+Bot.finishers = {}
+
+---Apply a list of { key, value, format } setting changes and describe them.
+---@param changes table
+---@return string?
+function Bot.applyChanges(changes)
+	local parts = {}
+	for _, change in ipairs(changes) do
+		Settings[change[1]] = change[2]
+		Bot.refreshSetting(change[1])
+		table.insert(parts, string.format(change[3], change[2]))
+	end
+
+	return #parts > 0 and table.concat(parts, ", ") or nil
+end
+
+---Setting changes from M1 swing samples of { t, distance }.
+---@param clicks table
+---@return table
+function Bot.m1Changes(clicks)
+	local changes = {}
+	if #clicks < 4 then
+		return changes
+	end
+
+	-- A gap over 0.7s ends a string; shorter gaps are the swing rhythm.
+	local rhythm, lengths, rests, distances = {}, {}, {}, {}
+	local length = 1
+	for index = 2, #clicks do
+		local gap = clicks[index].t - clicks[index - 1].t
+		if gap < 0.7 then
+			table.insert(rhythm, gap)
+			length += 1
+		else
+			table.insert(lengths, length)
+			if gap < 3 then
+				table.insert(rests, gap)
+			end
+			length = 1
+		end
+	end
+	table.insert(lengths, length)
+
+	for _, click in ipairs(clicks) do
+		if click.distance then
+			table.insert(distances, click.distance)
+		end
+	end
+
+	if #rhythm >= 3 then
+		table.insert(changes, { "botM1Rate", math.clamp(math.floor(Bot.median(rhythm) * 100 + 0.5) / 100, 0.1, 0.5), "M1 every %.2fs" })
+	end
+
+	if #lengths >= 2 then
+		table.insert(changes, { "botStringHits", math.clamp(math.floor(Bot.median(lengths)), 1, 8), "%d-hit strings" })
+	end
+
+	if #rests >= 2 then
+		table.insert(changes, { "botComboPause", math.clamp(math.floor(Bot.median(rests) * 20 + 0.5) / 20, 0.2, 1.2), "%.2fs rest" })
+	end
+
+	if #distances >= 4 then
+		table.insert(changes, { "botReach", math.clamp(math.floor(Bot.percentile(distances, 0.8) * 2 + 1) / 2, 3, 12), "reach %g" })
+		table.insert(changes, { "botEngage", math.clamp(math.floor(Bot.median(distances) * 2 + 0.5) / 2, 2, 12), "spacing %g" })
+	end
+
+	return changes
+end
+
+---Setting changes from front dash distances and side dash samples of { angle, distance, hook, since }.
+---@param fronts number[]
+---@param sides table
+---@return table
+function Bot.dashChanges(fronts, sides)
+	local changes = {}
+	if #fronts >= 2 then
+		table.insert(changes, { "botDashRange", math.clamp(math.floor(Bot.median(fronts)), 10, 60), "front dash from %d studs" })
+	end
+
+	-- Hooks follow a hit, circles are close, anything farther is a long arm.
+	local circle, away, far = {}, {}, 0
+	for _, side in ipairs(sides) do
+		if side.hook then
+			table.insert(away, -side.angle)
+		elseif side.distance <= Settings.hookRange then
+			table.insert(circle, side.angle)
+		else
+			far += 1
+		end
+	end
+
+	if #circle >= 2 then
+		table.insert(changes, { "hookAngle", math.clamp(math.floor(Bot.median(circle) / 5 + 0.5) * 5, 0, 80), "circle bend %d°" })
+	end
+
+	if #away >= 2 then
+		table.insert(changes, { "hookAwayAngle", math.clamp(math.floor(Bot.median(away) / 5 + 0.5) * 5, 10, 90), "hook away %d°" })
+	end
+
+	local total = #circle + #away + far
+	if total >= 4 then
+		table.insert(changes, { "longArmChance", math.clamp(math.floor(far / total * 100 + 0.5), 0, 60), "long arm %d%%" })
+	end
+
+	return changes
+end
+
+---Setting changes from back dash samples of { distance, since }.
+---@param backs table
+---@return table
+function Bot.backChanges(backs)
+	local changes = {}
+	if #backs < 2 then
+		return changes
+	end
+
+	local distances, delays = {}, {}
+	for _, back in ipairs(backs) do
+		table.insert(distances, back.distance)
+		if back.since and back.since < 1.5 then
+			table.insert(delays, back.since)
+		end
+	end
+
+	table.insert(changes, { "backStepRange", math.clamp(math.floor(Bot.percentile(distances, 0.75) + 1), 4, 20), "back step inside %d studs" })
+	if #delays >= 2 then
+		table.insert(changes, { "backStepDelay", math.clamp(math.floor(Bot.median(delays) * 20 + 0.5) / 20, 0, 0.6), "%.2fs after the string" })
+	end
+
+	return changes
+end
+
+---Setting changes from block hold durations.
+---@param holds number[]
+---@return table
+function Bot.blockChanges(holds)
+	if #holds < 3 then
+		return {}
+	end
+
+	return { { "blockHold", math.clamp(math.floor(Bot.median(holds) * 20 + 0.5) / 20, 0.1, 1), "block hold %.2fs" } }
+end
+
+---@return string
+function Bot.finishers.strafe(lesson)
+	local low, high = Bot.getSpacing()
+	local seconds = Bot.style.time - lesson.baseTime
+	if seconds < 5 then
+		return "no movement seen: lock or stay near an enemy"
+	end
+
+	return string.format("learned %ds, %d strafes, spacing %d-%d", seconds, #Bot.style.segments, low, high)
+end
+
+---@return string
+function Bot.finishers.dash(lesson)
+	return Bot.applyChanges(Bot.dashChanges(lesson.front, lesson.sides)) or "not enough dashes: dash at a target at least twice"
+end
+
+---@return string
+function Bot.finishers.circle(lesson)
+	local angles, distances = {}, {}
+	for _, side in ipairs(lesson.sides) do
+		if not side.hook then
+			table.insert(angles, side.angle)
+			table.insert(distances, side.distance)
+		end
+	end
+
+	if #angles < 2 then
+		return "not enough circle dashes: side dash close to a target at least twice"
+	end
+
+	return Bot.applyChanges({
+		{ "hookAngle", math.clamp(math.floor(Bot.median(angles) / 5 + 0.5) * 5, 0, 80), "circle bend %d°" },
+		{ "hookRange", math.clamp(math.floor(Bot.percentile(distances, 0.9) + 1), 6, 30), "circle range %d studs" },
+	}) or ""
+end
+
+---@return string
+function Bot.finishers.hookaway(lesson)
+	local angles, delays = {}, {}
+	for _, side in ipairs(lesson.sides) do
+		if side.hook then
+			table.insert(angles, -side.angle)
+			table.insert(delays, side.since)
+		end
+	end
+
+	if #angles < 2 then
+		return "not enough hooks: M1 then side dash away at least twice"
+	end
+
+	local changes = { { "hookAwayAngle", math.clamp(math.floor(Bot.median(angles) / 5 + 0.5) * 5, 10, 90), "hook away %d°" } }
+	table.insert(changes, { "backStepDelay", math.clamp(math.floor(Bot.median(delays) * 20 + 0.5) / 20, 0, 0.6), "%.2fs after the hit" })
+	return Bot.applyChanges(changes) or ""
+end
+
+---@return string
+function Bot.finishers.loop(lesson)
+	if #lesson.loops < 2 then
+		return "not enough loops: M1 then circle dash at least twice"
+	end
+
+	local delays, hits = {}, {}
+	for _, loop in ipairs(lesson.loops) do
+		table.insert(delays, loop.since)
+		table.insert(hits, loop.hits)
+	end
+
+	return Bot.applyChanges({
+		{ "loopDelay", math.clamp(math.floor(Bot.median(delays) * 100 + 0.5) / 100, 0.05, 0.6), "dash %.2fs after the hit" },
+		{ "loopHits", math.clamp(math.floor(Bot.median(hits)), 1, 8), "after hit %d" },
+	}) or ""
+end
+
+---@return string
+function Bot.finishers.bdc(lesson)
+	if #lesson.bdcs < 2 then
+		return "not enough cancels: M1 then back dash at least twice"
+	end
+
+	local delays, hits = {}, {}
+	for _, cancel in ipairs(lesson.bdcs) do
+		table.insert(delays, cancel.since)
+		table.insert(hits, cancel.hits)
+	end
+
+	local changes = {
+		{ "cancelDelay", math.clamp(math.floor(Bot.median(delays) * 100 + 0.5) / 100, 0.05, 0.8), "back dash %.2fs after the hit" },
+		{ "bdcHits", math.clamp(math.floor(Bot.median(hits)), 1, 8), "after hit %d" },
+	}
+	if #lesson.returns >= 2 then
+		table.insert(changes, { "bdcReturn", math.clamp(math.floor(Bot.median(lesson.returns) * 100 + 0.5) / 100, 0.1, 1.2), "return %.2fs later" })
+	end
+
+	return Bot.applyChanges(changes) or ""
+end
+
+---@return string
+function Bot.finishers.bullet(lesson)
+	if #lesson.front < 2 then
+		return "not enough front dashes: dash at a target at least twice"
+	end
+
+	local low = math.clamp(math.floor(Bot.percentile(lesson.front, 0.1)), 8, 60)
+	local high = math.clamp(math.ceil(Bot.percentile(lesson.front, 0.9)), low + 2, 80)
+	return Bot.applyChanges({
+		{ "bulletMin", low, "bullet from %d" },
+		{ "bulletMax", high, "to %d studs" },
+	}) or ""
+end
+
+---@return string
+function Bot.finishers.spacing(lesson)
+	if #lesson.dists < 10 then
+		return "no spacing seen: stay near an enemy"
+	end
+
+	local tiles = math.clamp(math.floor(Bot.median(lesson.dists) / Bot.tile * 2 + 0.5) / 2, 2, 8)
+	Settings.spacePerfect = true
+	Bot.refreshSetting("spacePerfect")
+	return Bot.applyChanges({ { "spaceTiles", tiles, "spacing %g tiles" } }) or ""
+end
+
+---@return string
+function Bot.finishers.m1(lesson)
+	return Bot.applyChanges(Bot.m1Changes(lesson.clicks)) or "not enough M1s: swing at a target at least four times"
+end
+
+---@return string
+function Bot.finishers.back(lesson)
+	return Bot.applyChanges(Bot.backChanges(lesson.backs)) or "not enough back dashes: M1 then back dash at least twice"
+end
+
+---@return string
+function Bot.finishers.block(lesson)
+	return Bot.applyChanges(Bot.blockChanges(lesson.holds)) or "not enough blocks: block at least three times"
+end
+
+---@return string
+function Bot.finishers.punishtime(lesson)
+	if #lesson.reactions < 3 then
+		return "not enough punishes: swing or dash right after an enemy misses, at least three times"
+	end
+
+	local window = math.clamp(math.floor((Bot.percentile(lesson.reactions, 0.8) + 0.1) * 20 + 0.5) / 20, 0.2, 1.2)
+	return Bot.applyChanges({ { "punishWindow", window, "punish window %.2fs" } })
+end
+
+---@return string
+function Bot.finishers.escape(lesson)
+	local escapes = lesson.escapes
+	if #escapes < 3 then
+		return "not enough dashes while ragdolled: get ragdolled and dash out"
+	end
+
+	local counts = { Back = 0, Left = 0, Right = 0 }
+	local gaps = {}
+	for index, escape in ipairs(escapes) do
+		local name = escape.key == Enum.KeyCode.S and "Back" or (escape.key == Enum.KeyCode.A and "Left" or (escape.key == Enum.KeyCode.D and "Right" or nil))
+		if name then
+			counts[name] += 1
+		end
+
+		local gap = index > 1 and escape.t - escapes[index - 1].t or nil
+		if gap and gap < 1 then
+			table.insert(gaps, gap)
+		end
+	end
+
+	local best = "Back"
+	for name, count in pairs(counts) do
+		if count > counts[best] then
+			best = name
+		end
+	end
+
+	local changes = { { "evasiveDirection", best, "escape dash %s" } }
+	if #gaps >= 2 then
+		table.insert(changes, { "evasiveRate", math.clamp(math.floor(Bot.median(gaps) * 100 + 0.5) / 100, 0.02, 0.2), "every %.2fs" })
+	end
+
+	return Bot.applyChanges(changes) or ""
+end
+
+---Turn the samples of a finished timed lesson into settings.
+function Bot.finishLesson()
+	local lesson = Bot.lesson
+	Bot.lesson = nil
+	if not lesson then
+		return
+	end
+
+	local result = Bot.finishers[lesson.id](lesson)
+	Bot.lessonResult = result
+	Bot.save()
+	log("lesson done: " .. result)
+end
+
+---Advance the running lesson.
+---@param now number
+---@param myRoot BasePart?
+function Bot.updateLesson(now, myRoot)
+	local lesson = Bot.lesson
+	if not lesson then
+		return
+	end
+
+	if lesson.slot then
+		if not Bot.recording then
+			Bot.lesson = nil
+			local combo = Bot.combos[lesson.slot]
+			Bot.lessonResult = combo ~= lesson.before and string.format("%s saved: %d inputs, %.1fs", lesson.slot, #combo.events, combo.length) or "nothing recorded"
+		end
+		return
+	end
+
+	if myRoot then
+		local lockRoot = Bot.lockOn and Bot.lockTarget and Bot.getParts(Bot.lockTarget)
+		Bot.lessonRoot = lockRoot or getNearestTarget(myRoot, 45)
+
+		if lesson.id == "spacing" and Bot.lessonRoot and now - (lesson.sampleAt or 0) >= 0.2 then
+			lesson.sampleAt = now
+			local flat = ((Bot.lessonRoot.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+			if flat <= 35 and flat > Settings.botReach then
+				table.insert(lesson.dists, flat)
+			end
+		end
+	end
+
+	if now >= lesson.endsAt then
+		Bot.finishLesson()
+	end
+end
+
+---Describe the lesson in progress for the window and the quick pad.
+---@return string
+function Bot.lessonText()
+	local lesson = Bot.lesson
+	if not lesson then
+		return Bot.recording and string.format("Recording %s: %d inputs", Bot.recording.slot, #Bot.recording.events) or ""
+	end
+
+	if lesson.slot then
+		return string.format("%s: do it now (%d inputs)", lesson.info.name, Bot.recording and #Bot.recording.events or 0)
+	end
+
+	local left = math.max(math.ceil(lesson.endsAt - os.clock()), 0)
+	local id = lesson.id
+	local progress
+	if id == "strafe" then
+		progress = string.format("%ds seen", Bot.style.time - lesson.baseTime)
+	elseif id == "dash" then
+		progress = string.format("%d front, %d side", #lesson.front, #lesson.sides)
+	elseif id == "circle" or id == "hookaway" then
+		progress = string.format("%d side dashes", #lesson.sides)
+	elseif id == "m1" then
+		progress = string.format("%d swings", #lesson.clicks)
+	elseif id == "back" then
+		progress = string.format("%d back dashes", #lesson.backs)
+	elseif id == "block" then
+		progress = string.format("%d blocks", #lesson.holds)
+	elseif id == "punishtime" then
+		progress = string.format("%d punishes", #lesson.reactions)
+	elseif id == "loop" then
+		progress = string.format("%d loops", #lesson.loops)
+	elseif id == "bdc" then
+		progress = string.format("%d cancels", #lesson.bdcs)
+	elseif id == "bullet" then
+		progress = string.format("%d front dashes", #lesson.front)
+	elseif id == "spacing" then
+		progress = string.format("%d samples", #lesson.dists)
+	else
+		progress = string.format("%d escapes", #lesson.escapes)
+	end
+
+	return string.format("%s: %ds left, %s", lesson.info.name, left, progress)
+end
+
+---Add a value to a list, dropping the oldest past a cap.
+---@param list table
+---@param value any
+---@param cap number
+function Bot.push(list, value, cap)
+	table.insert(list, value)
+	if #list > cap then
+		table.remove(list, 1)
+	end
+end
+
+---Copy the last few entries of a list.
+---@param list table
+---@param count number
+---@return table
+function Bot.tail(list, count)
+	local out = {}
+	for index = math.max(#list - count + 1, 1), #list do
+		table.insert(out, list[index])
+	end
+
+	return out
+end
+
+---Make styles safe for JSON.
+---@param style table
+---@return table
+function Bot.packStyle(style)
+	local dist = {}
+	for bucket, seconds in pairs(style.dist) do
+		dist[tostring(bucket)] = seconds
+	end
+
+	Bot.ensureTypes(style)
+	return { segments = style.segments, time = style.time, pokes = style.pokes, dashes = style.dashes, dist = dist, types = style.types }
+end
+
+---Read a saved style back.
+---@param saved table
+---@return table
+function Bot.unpackStyle(saved)
+	local style = { segments = saved.segments or {}, dist = {}, time = saved.time or 0, pokes = saved.pokes or 0, dashes = saved.dashes or 0, types = saved.types }
+	Bot.ensureTypes(style)
+	for bucket, seconds in pairs(saved.dist or {}) do
+		style.dist[tonumber(bucket)] = seconds
+	end
+
+	return style
+end
+
+---The style the bot plays from.
+---@return table
+function Bot.activeStyle()
+	return Bot.style
+end
+
+---Name a side dash by the tips: a hook follows a hit, circles are close, long arms use the full range.
+---@param distance number
+---@param sinceM1 number? Seconds since their last M1.
+---@return string
+function Bot.classifySide(distance, sinceM1)
+	if sinceM1 and sinceM1 < Settings.hookWindow then
+		return "hook"
+	end
+
+	return distance <= Settings.hookRange and "circle" or "longarm"
+end
+
+---Count one dash of a kind in a style.
+---@param style table
+---@param kind string FRONT, BACK or SIDE.
+---@param distance number
+---@param sinceM1 number?
+function Bot.countDash(style, kind, distance, sinceM1)
+	Bot.ensureTypes(style)
+	if kind == "FRONT" then
+		style.types.front += 1
+	elseif kind == "BACK" then
+		style.types.back += 1
+	else
+		local side = Bot.classifySide(distance, sinceM1)
+		style.types[side] += 1
+	end
+end
+
+---Count a dash the player just pressed while the style is learning from them.
+---@param dashKey Enum.KeyCode
+function Bot.countOwnDash(dashKey)
+	if not Bot.learningSelf() then
+		return
+	end
+
+	local style = Bot.style
+	style.dashes += 1
+
+	local now = os.clock()
+	local myRoot, opponent = Bot.myRoot, Bot.selfOpponent
+	local distance = 0
+	if myRoot and opponent and opponent.Parent and now - Bot.selfOpponentAt < 0.5 then
+		distance = ((opponent.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude
+	end
+
+	local since = Bot.selfLastM1 and now - Bot.selfLastM1 or nil
+	if dashKey == Enum.KeyCode.W then
+		Bot.countDash(style, "FRONT", distance, since)
+	elseif dashKey == Enum.KeyCode.S then
+		Bot.countDash(style, "BACK", distance, since)
+	elseif distance > 0 then
+		Bot.countDash(style, "SIDE", distance, since)
+	end
+end
+
+---Read a move's cooldown from the game's bar: nil when it is not shown.
+---@param name string
+---@return boolean?
+function Bot.cooldownState(name)
+	local bar = playerGui:FindFirstChild("Bar")
+	local magic = bar and bar:FindFirstChild("MagicHealth")
+	local cooldowns = magic and magic:FindFirstChild("cdholder")
+	local entry = cooldowns and cooldowns:FindFirstChild(name, true)
+	local template = entry and entry:FindFirstChild("template")
+	local fill = template and template:FindFirstChild("Fill")
+	if not fill then
+		return nil
+	end
+
+	return fill.Size.Y.Scale > 0.01
+end
+
+---Whether Backlash is available.
+---@return boolean
+function Bot.backlashReady()
+	if Settings.backlashMode == "Always" then
+		return true
+	elseif Settings.backlashMode == "Never" then
+		return false
+	end
+
+	return Bot.cooldownState(Settings.backlashName) == false
+end
+
+---Roll whether a long arm is worth it: common with Backlash up, a rare surprise otherwise.
+---@return boolean
+function Bot.longArmAllowed()
+	local chance = Bot.backlashReady() and Settings.longArmBacklash or Settings.longArmChance
+
+	-- Players who use long arms more than usual make the bot use them more.
+	local types = Bot.activeStyle().types
+	if Settings.styleUse and types then
+		local total = types.circle + types.longarm + types.hook
+		if total >= 6 then
+			chance = math.clamp(chance * (types.longarm / total) / 0.15, 0, 60)
+		end
+	end
+
+	return math.random() * 100 < chance
+end
+
+---Re-roll the long arm decision every couple of seconds.
+---@param now number
+function Bot.rollLongArm(now)
+	if now >= Bot.rollAt then
+		Bot.rollAt = now + 2
+		Bot.longArmOk = Bot.longArmAllowed()
+	end
+end
+
+---How often to hook away instead of backing straight off, from what was learned.
+---@return number
+function Bot.hookShare()
+	local types = Bot.activeStyle().types
+	if Settings.styleUse and types then
+		local total = types.hook + types.back
+		if total >= 6 then
+			return types.hook / total
+		end
+	end
+
+	return 0.6
+end
+
+Bot.tips = {
+	{ key = "botHook", title = "Circle Dash", short = "Close side dash that wraps to their back" },
+	{ key = "longArm", title = "Long Arm", short = "Full range: only with Backlash or as a surprise" },
+	{ key = "hookAway", title = "Hook Away", short = "Dash away after a hit so they cannot M1 catch" },
+}
+
+---Time until a point moving at a velocity first comes within a radius, or nil if it never does.
+---@param offset Vector3 Flat offset from us to them.
+---@param velocity Vector3 Flat velocity relative to us.
+---@param remaining number Seconds the movement lasts.
+---@param radius number
+---@return number?
+function Bot.pathIntercept(offset, velocity, remaining, radius)
+	if offset.Magnitude <= radius then
+		return 0
+	end
+
+	for t = 0.025, remaining, 0.025 do
+		if (offset + velocity * t).Magnitude <= radius then
+			return t
+		end
+	end
+
+	return nil
+end
+
+---Remember a side dash so chained dashes can be expected.
+---@param root BasePart
+function Bot.noteSideDash(root)
+	local now = os.clock()
+	local record = Bot.dashMemory[root]
+	if not record or now - record.last > 3 then
+		record = { count = 0, last = now }
+		Bot.dashMemory[root] = record
+	end
+
+	record.count += 1
+	record.last = now
+end
+
+---Guess that the nearest enemy is about to side dash, before the animation reaches us.
+---Chained dashes, a just-finished move and fast sideways movement all raise the score.
+---@param myRoot BasePart
+function Bot.anticipate(myRoot)
+	local now = os.clock()
+	if not Settings.dashAnticipate or not Settings.dashPredictor or now - Bot.anticipateAt < 0.05 then
+		return
+	end
+
+	Bot.anticipateAt = now
+	local root = getNearestTarget(myRoot, Settings.predictRange)
+	if not root then
+		Bot.armed = nil
+		return
+	end
+
+	local offset = (root.Position - myRoot.Position) * Vector3.new(1, 0, 1)
+	if offset.Magnitude < 0.1 then
+		return
+	end
+
+	local score = 0
+	local record = Bot.dashMemory[root]
+	if record and now - record.last < 2.5 then
+		score += 0.35 + 0.1 * math.min(record.count, 3)
+	end
+
+	local endedAt = lastMoveEnd[root]
+	if endedAt and now - endedAt < Settings.hookWindow + 0.3 then
+		score += 0.4
+	end
+
+	local velocity = root.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
+	local direction = offset.Unit
+	local sideways = (velocity - direction * velocity:Dot(direction)).Magnitude
+	if sideways > 8 then
+		score += 0.3
+	end
+
+	if score >= 0.5 then
+		Bot.armed = { root = root, untilAt = now + 0.4 }
+	elseif Bot.armed and (Bot.armed.root ~= root or now > Bot.armed.untilAt) then
+		Bot.armed = nil
+	end
+end
+
+---Describe what the adapter has found works, best tech first.
+---@return string
+function Bot.adaptSummary()
+	local everyone = Bot.adapt["*"]
+	if not everyone then
+		return "nothing yet"
+	end
+
+	local best, bestRate = nil, -1
+	for name, stat in pairs(everyone.techs) do
+		if stat.tries >= 2 then
+			local rate = stat.wins / stat.tries
+			if rate > bestRate then
+				best, bestRate = name, rate
+			end
+		end
+	end
+
+	return best and string.format("%s works %d%%", best, math.floor(bestRate * 100 + 0.5)) or "nothing yet"
+end
+
+---Run every frame: recording, lock, study, assists and the fight bot.
+function Bot.update()
+	local now = os.clock()
+	local myCharacter, myRoot, myHumanoid = getMe()
+	Bot.myRoot = myRoot
+	Bot.myHumanoid = myHumanoid
+	if Bot.frontLockUntil and now >= Bot.frontLockUntil then
+		Bot.frontLockUntil = nil
+		if Bot.frontLockAuto then
+			Bot.setLock(false)
+		end
+	end
+	Bot.ragdolled = myCharacter ~= nil and myHumanoid ~= nil and isRagdolled(myCharacter, myHumanoid)
+	Bot.updateRecording(now)
+	Bot.updateLesson(now, myRoot)
+
+	if Settings.botEnabled ~= Bot.active then
+		Bot.active = Settings.botEnabled
+		Bot.applyProfile(Bot.active)
+		Bot.target = nil
+		Bot.moveVector = Vector3.zero
+		Bot.hits = 0
+		Bot.mode = "NEUTRAL"
+
+		if not Bot.active then
+			if myHumanoid then
+				myHumanoid:Move(Vector3.zero, false)
+			end
+			if Bot.comboRun then
+				Bot.comboRun.cancel = true
+			end
+			if Bot.macroRun then
+				Bot.macroRun.cancel = true
+			end
+			if not Bot.lockOn then
+				stopLock()
+			end
+			Bot.status = "Off"
+		end
+	end
+
+	if not (myCharacter and myRoot and myHumanoid) or myHumanoid.Health <= 0 then
+		Bot.moveVector = Vector3.zero
+		Bot.assistRoot = nil
+		Bot.status = Bot.active and "Waiting for respawn" or "Off"
+		return
+	end
+
+	Bot.updateLockTarget(myCharacter, myRoot, now)
+	Bot.updateAssistTarget(myRoot)
+	Bot.updateStudy(myRoot, now)
+
+	if Bot.active then
+		Bot.fight(now, myCharacter, myRoot, myHumanoid)
+	end
+end
+
+---Feed the bot's walk direction to the humanoid each frame.
+function Bot.applyMove()
+	Bot.updateLines()
+
+	if not Bot.active or Bot.moveVector.Magnitude < 0.01 then
+		return
+	end
+
+	local _, _, humanoid = getMe()
+	if humanoid and humanoid.Health > 0 then
+		local move = Bot.moveVector
+		humanoid:Move(move.Magnitude > 1 and move.Unit or move, false)
+	end
+end
+
+---Handle the bot's hotkeys.
+---@param input InputObject
+---@param processed boolean
+function Bot.onKey(input, processed)
+	if processed then
+		return
+	end
+
+	local code = input.KeyCode
+	if code == Bot.keys.bot then
+		Settings.botEnabled = not Settings.botEnabled
+		local refresh = uiRefreshers.botEnabled
+		if refresh then
+			refresh(true)
+		end
+	elseif code == Bot.keys.lock then
+		Bot.setLock(not Bot.lockOn)
+	elseif code == Bot.keys.cycle then
+		Bot.cycleLock()
+	elseif code == Bot.keys.combo then
+		Bot.playSelected()
+	end
+end
+
+---Apply settings that need a one-time write when changed.
+---@param key string
+local function onSettingChanged(key)
+	lightingService.GlobalShadows = not Settings.noShadows and originalShadows
+end
+
+---Get the file name for the selected preset slot.
+---@return string
+local function getPresetName()
+	return (Settings.presetSlot:gsub("%s", "_")) .. ".json"
+end
+
+---Save the current settings to the selected slot.
+local function savePreset()
+	local data = {}
+	for key, value in pairs(Settings) do
+		local kind = type(value)
+		if key ~= "presetSlot" and (kind == "number" or kind == "boolean" or kind == "string") then
+			data[key] = value
+		end
+	end
+
+	local encoded = httpService:JSONEncode(data)
+	local name = getPresetName()
+
+	shared.ZennyPresets = shared.ZennyPresets or {}
+	shared.ZennyPresets[name] = encoded
+
+	local saved = false
+	if writefile then
+		saved = pcall(function()
+			if makefolder and isfolder and not isfolder("Zenny") then
+				makefolder("Zenny")
+			end
+			writefile("Zenny/" .. name, encoded)
+		end)
+	end
+
+	presetStatus = string.format("Saved %s%s", Settings.presetSlot, saved and "" or " (memory only)")
+end
+
+---Load settings from the selected slot.
+local function loadPreset()
+	local name = getPresetName()
+	local encoded = shared.ZennyPresets and shared.ZennyPresets[name]
+
+	if readfile and isfile then
+		pcall(function()
+			if isfile("Zenny/" .. name) then
+				encoded = readfile("Zenny/" .. name)
+			end
+		end)
+	end
+
+	if not encoded then
+		presetStatus = string.format("%s is empty", Settings.presetSlot)
+		return
+	end
+
+	local ok, data = pcall(function()
+		return httpService:JSONDecode(encoded)
+	end)
+	if not ok or type(data) ~= "table" then
+		presetStatus = "Could not read " .. Settings.presetSlot
+		return
+	end
+
+	for key, value in pairs(data) do
+		if key ~= "presetSlot" and type(Settings[key]) == type(value) then
+			Settings[key] = value
+			local refresh = uiRefreshers[key]
+			if refresh then
+				refresh(true)
+			end
+		end
+	end
+
+	onSettingChanged("preset")
+	presetStatus = "Loaded " .. Settings.presetSlot
+end
+
+---Log every remote under our character to help find the input remote.
+local function scanRemotes()
+	local character = localPlayer.Character
+	if not character then
+		log("scan: no character")
+		return
+	end
+
+	local count = 0
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("RemoteEvent") or descendant:IsA("RemoteFunction") then
+			count += 1
+			log(string.format("remote: %s (%s) in %s", descendant.Name, descendant.ClassName, descendant.Parent.Name))
+		end
+	end
+
+	log(string.format("scan: %d remotes, input remote %s", count, getRemote() and "FOUND" or "MISSING"))
+end
+
+---Log every visible button in the player gui to help find the M1 button.
+local function scanButtons()
+	local count = 0
+	for _, descendant in ipairs(playerGui:GetDescendants()) do
+		if descendant:IsA("GuiButton") and descendant.Visible and count < 40 then
+			count += 1
+			local text = descendant:IsA("TextButton") and descendant.Text or ""
+			log(string.format("button: %s / %s %s", descendant.Parent and descendant.Parent.Name or "?", descendant.Name, text ~= "" and ("'" .. text .. "'") or ""))
+		end
+	end
+
+	log(string.format("scan: %d buttons shown, M1 button %s", count, findM1Button() and findM1Button().Name or "none"))
+end
+
+---Try each M1 method one after another so you can see which one punches.
+local function testAllM1()
+	task.spawn(function()
+		for index, method in ipairs({ "Remote+Mobile", "Remote", "Signal", "Button" }) do
+			log(string.format("TEST %d/4: %s", index, method))
+			sendM1(method, "test")
+			task.wait(1.5)
+		end
+
+		log("TEST done: tell me which number punched")
+	end)
+end
+
+-- Combat lab.
+local LAB_DASH_TIME = 0.4
+local LAB_FRONT_LAG = 0.12
+local LAB_TEST_NAMES = {
+	"Side Dash In",
+	"Side Dash Away",
+	"Block: Side Dash",
+	"Backdash",
+	"Front Dash",
+	"Block: Uppercut",
+	"Block: Consec",
+	"Block: Shove",
+	"Block: M1 String",
+}
+local LAB_TESTS = {
+	["Side Dash In"] = { type = "dash", kind = "LEFT" },
+	["Side Dash Away"] = { type = "dash", kind = "RIGHT" },
+	["Block: Side Dash"] = { type = "dash", kind = "LEFT", block = true },
+	["Backdash"] = { type = "dash", kind = "BACK" },
+	["Front Dash"] = { type = "dash", kind = "FRONT" },
+	["Block: Uppercut"] = { type = "attack" },
+	["Block: Consec"] = { type = "attack" },
+	["Block: Shove"] = { type = "attack" },
+	["Block: M1 String"] = { type = "string" },
+}
+
+local labRunning = false
+local labResultCallback = nil
+local labHistory = {}
+
+---Keep only the flat part of a vector and normalize it.
+---@param vector Vector3
+---@return Vector3
+local function flatten(vector)
+	local flat = Vector3.new(vector.X, 0, vector.Z)
+	return flat.Magnitude > 0 and flat.Unit or Vector3.new(0, 0, -1)
+end
+
+---Pick the animation id for a dash kind, preferring a learned one.
+---@param kind string
+---@return string?
+local function getDashAnimationId(kind)
+	if kind == "BACK" and next(learned.back) then
+		return (next(learned.back))
+	end
+
+	if kind == "FRONT" and next(learned.front) then
+		return (next(learned.front))
+	end
+
+	for id, dashKind in pairs(DASH_TYPES) do
+		if dashKind == kind then
+			return id
+		end
+	end
+
+	return nil
+end
+
+---Get the animation ids a block test plays.
+---@param testName string
+---@return table
+local function getAttackIds(testName)
+	if testName == "Block: Uppercut" then
+		return { "10503381238" }
+	end
+
+	if testName == "Block: Consec" then
+		local id = next(learned.barrage) or next(SEED_IDS.barrage)
+		return id and { id } or {}
+	end
+
+	if testName == "Block: Shove" then
+		local id = next(learned.shove) or next(SEED_IDS.shove)
+		return id and { id } or {}
+	end
+
+	local ids = {}
+	for id in pairs(learned.m1) do
+		table.insert(ids, id)
+	end
+	table.sort(ids)
+
+	return ids
+end
+
+---Copy our character into a script-free practice target.
+---@return Model?
+local function getLabDummy()
+	if labDummy and labDummy.Parent then
+		return labDummy
+	end
+
+	local character = localPlayer.Character
+	if not character then
+		return nil
+	end
+
+	local archivable = character.Archivable
+	character.Archivable = true
+	local clone = character:Clone()
+	character.Archivable = archivable
+	if not clone then
+		return nil
+	end
+
+	for _, descendant in ipairs(clone:GetDescendants()) do
+		if descendant:IsA("Script") or descendant:IsA("LocalScript") then
+			descendant:Destroy()
+		elseif descendant:IsA("BasePart") then
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+		end
+	end
+
+	local humanoid = clone:FindFirstChildOfClass("Humanoid")
+	local root = clone:FindFirstChild("HumanoidRootPart")
+	if not (humanoid and root) then
+		clone:Destroy()
+		return nil
+	end
+
+	clone.Name = "ZennyDummy"
+	humanoid.WalkSpeed = 0
+	humanoid.AutoRotate = false
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	humanoid.Health = humanoid.MaxHealth
+	if not humanoid:FindFirstChildOfClass("Animator") then
+		newInstance("Animator", {}, humanoid)
+	end
+
+	labDummy = clone
+	return clone
+end
+
+---Remove the practice target.
+local function removeLabDummy()
+	if labDummy then
+		labDummy:Destroy()
+		labDummy = nil
+	end
+end
+
+---Play an animation id on the practice target.
+---@param animator Animator
+---@param id string
+---@return AnimationTrack?
+local function playLabTrack(animator, id)
+	local animation = newInstance("Animation", { AnimationId = "rbxassetid://" .. id }, nil)
+	local ok, track = pcall(function()
+		return animator:LoadAnimation(animation)
+	end)
+	if not ok or not track then
+		return nil
+	end
+
+	track:Play(0.05)
+	return track
+end
+
+---Get the distance at a time by looking through the recorded samples.
+---@param samples table
+---@param time number
+---@return number
+local function distanceAt(samples, time)
+	local last = math.huge
+	for _, sample in ipairs(samples) do
+		last = sample.distance
+		if sample.t >= time then
+			return sample.distance
+		end
+	end
+
+	return last
+end
+
+---Turn block events into intervals in lab time.
+---@param events table
+---@param total number
+---@return table
+local function buildIntervals(events, total)
+	local intervals, open = {}, nil
+	for _, event in ipairs(events) do
+		if event.name == "BLOCK" then
+			table.insert(intervals, { from = event.t, to = event.t + (event.data.duration or 0.3) })
+		elseif event.name == "HOLD" then
+			open = event.t
+		elseif event.name == "RELEASE" and open then
+			table.insert(intervals, { from = open, to = event.t })
+			open = nil
+		end
+	end
+
+	if open then
+		table.insert(intervals, { from = open, to = total })
+	end
+
+	return intervals
+end
+
+---Check whether a block covers a hit once the ping delay is applied.
+---@param intervals table
+---@param hitTime number
+---@param ping number
+---@return string, number
+local function checkCoverage(intervals, hitTime, ping)
+	if #intervals == 0 then
+		return "NONE", 0
+	end
+
+	local state, gap = "LATE", math.huge
+	for _, interval in ipairs(intervals) do
+		local lands, ends = interval.from + ping, interval.to + ping
+		if lands <= hitTime and ends >= hitTime then
+			return "BLOCKED", math.min(hitTime - lands, ends - hitTime)
+		end
+
+		if lands > hitTime and lands - hitTime < gap then
+			state, gap = "LATE", lands - hitTime
+		elseif ends < hitTime and hitTime - ends < gap then
+			state, gap = "EARLY", hitTime - ends
+		end
+	end
+
+	return state, gap
+end
+
+---Explain why nothing happened, from the events that were recorded.
+---@param events table
+---@return string
+local function explainMiss(events)
+	local detected, threat, ignored = false, nil, nil
+	for _, event in ipairs(events) do
+		if event.name == "DETECT" then
+			detected = true
+		elseif event.name == "THREAT" then
+			threat = event.data
+		elseif event.name == "IGNORED" then
+			ignored = event.data.reason
+		end
+	end
+
+	if ignored then
+		return "Detected but ignored (" .. ignored .. ")."
+	end
+
+	if not detected then
+		return "Slotted never detected the animation. Learn it first, or check Broad Detection."
+	end
+
+	if threat and not threat.threat then
+		return string.format("Detected at %d studs but not counted as a threat (range or facing).", threat.distance)
+	end
+
+	return "Detected, but no action was taken."
+end
+
+---Score a dash catch test.
+---@param run table
+---@param test table
+---@param distance number
+---@return table
+local function evaluateDash(run, test, distance)
+	local ping = Settings.labPing / 1000
+	local startup = Settings.labStartup
+	local reach = Settings.labReach
+	local m1Event
+	for _, event in ipairs(run.events) do
+		if event.name == "M1" then
+			m1Event = event
+			break
+		end
+	end
+
+	local windowStart, windowEnd
+	for _, sample in ipairs(run.samples) do
+		if sample.distance <= reach then
+			windowStart = windowStart or sample.t
+			windowEnd = sample.t
+		end
+	end
+
+	local timeline = {
+		total = 1,
+		bars = { { from = 0, to = LAB_DASH_TIME, lane = 0, color = COLORS.accentDark } },
+		ticks = {},
+	}
+	if windowStart then
+		table.insert(timeline.bars, { from = windowStart, to = windowEnd, lane = 1, color = COLORS.good })
+	end
+
+	local result = { lines = {}, timeline = timeline }
+	local enabled = test.kind == "BACK" and Settings.bdcEnabled or Settings.catchEnabled
+
+	if windowStart then
+		table.insert(
+			result.lines,
+			string.format("Best M1 window: %d to %d ms", math.max(windowStart - ping - startup, 0) * 1000, math.max(windowEnd - ping - startup, 0) * 1000)
+		)
+	else
+		table.insert(result.lines, string.format("They never got within %g studs of you.", reach))
+	end
+
+	if not m1Event then
+		result.ok = false
+		result.title = "NO M1"
+		table.insert(result.lines, 1, enabled and explainMiss(run.events) or "Auto M1 for this dash is turned off.")
+		return result
+	end
+
+	local landing = m1Event.t + ping + startup
+	local landed = distanceAt(run.samples, landing)
+	result.ok = landed <= reach
+	result.title = result.ok and "HIT" or "WHIFF"
+	table.insert(timeline.ticks, { at = landing, color = result.ok and COLORS.good or COLORS.bad })
+	table.insert(result.lines, 1, string.format("M1 fired %d ms in and landed %.1f studs away (reach %g).", m1Event.t * 1000, landed, reach))
+
+	if not result.ok then
+		table.insert(result.lines, landed > reach and "Too far: raise Hit Reach or lower the delay." or "")
+	end
+
+	return result
+end
+
+---Score a front dash block test.
+---@param run table
+---@return table
+local function evaluateFront(run)
+	local ping = Settings.labPing / 1000
+	local hitTime = LAB_DASH_TIME + LAB_FRONT_LAG
+	local intervals = buildIntervals(run.events, 1)
+	local state, gap = checkCoverage(intervals, hitTime, ping)
+
+	local timeline = {
+		total = 1,
+		bars = { { from = 0, to = LAB_DASH_TIME, lane = 0, color = COLORS.accentDark } },
+		ticks = { { at = hitTime, color = COLORS.bad } },
+	}
+	for _, interval in ipairs(intervals) do
+		table.insert(timeline.bars, { from = interval.from + ping, to = interval.to + ping, lane = 1, color = COLORS.accent })
+	end
+
+	local result = { lines = {}, timeline = timeline }
+	result.ok = state == "BLOCKED"
+
+	if state == "BLOCKED" then
+		result.title = "BLOCKED"
+		table.insert(result.lines, string.format("A hit %d ms after the dash ended was covered by %d ms.", LAB_FRONT_LAG * 1000, gap * 1000))
+	elseif state == "NONE" then
+		result.title = "NO BLOCK"
+		table.insert(result.lines, Settings.frontBlock and explainMiss(run.events) or "Front Dash Block is turned off.")
+	elseif state == "LATE" then
+		result.title = "TOO LATE"
+		table.insert(result.lines, string.format("Block landed %d ms after the hit.", gap * 1000))
+	else
+		result.title = "RELEASED EARLY"
+		table.insert(result.lines, string.format("Block ended %d ms before the hit: raise Chain Tail.", gap * 1000))
+	end
+
+	return result
+end
+
+---Score the side dash block test: a hit lands shortly after they arrive.
+---@param run table
+---@return table
+local function evaluateSideBlock(run)
+	local ping = Settings.labPing / 1000
+	local arrival
+	for _, sample in ipairs(run.samples) do
+		if sample.distance <= Settings.labReach then
+			arrival = sample.t
+			break
+		end
+	end
+
+	if not arrival then
+		return { ok = false, title = "NO ARRIVAL", lines = { "They never came within hit reach, so nothing would hit you." } }
+	end
+
+	local hitTime = arrival + 0.12
+	local intervals = buildIntervals(run.events, hitTime + 0.6)
+	local state, gap = checkCoverage(intervals, hitTime, ping)
+
+	local timeline = {
+		total = 1,
+		bars = { { from = 0, to = LAB_DASH_TIME, lane = 0, color = COLORS.accentDark } },
+		ticks = { { at = hitTime, color = COLORS.bad } },
+	}
+	for _, interval in ipairs(intervals) do
+		table.insert(timeline.bars, { from = interval.from + ping, to = interval.to + ping, lane = 1, color = COLORS.accent })
+	end
+
+	local result = { lines = {}, timeline = timeline, ok = state == "BLOCKED" }
+	if state == "BLOCKED" then
+		result.title = "BLOCKED"
+		table.insert(result.lines, string.format("A hit %d ms after they arrived was covered by %d ms.", 120, gap * 1000))
+	elseif state == "NONE" then
+		result.title = "NO BLOCK"
+		local reason = "Side Dash Block is turned off."
+		if Settings.dashPredict then
+			reason = Settings.catchEnabled and "Auto M1 catch is on, which handles side dashes instead of blocking." or explainMiss(run.events)
+		end
+		table.insert(result.lines, reason)
+	elseif state == "LATE" then
+		result.title = "TOO LATE"
+		table.insert(result.lines, string.format("Block landed %d ms after the hit.", gap * 1000))
+	else
+		result.title = "RELEASED EARLY"
+		table.insert(result.lines, string.format("Block ended %d ms before the hit: raise Block After.", gap * 1000))
+	end
+
+	return result
+end
+
+---Score a block test against one or more hits.
+---@param run table
+---@param hits table
+---@return table
+local function evaluateBlock(run, hits)
+	local ping = Settings.labPing / 1000
+	local total = hits[#hits] + 0.6
+	local intervals = buildIntervals(run.events, total)
+
+	local timeline = { total = total, bars = {}, ticks = {} }
+	for _, interval in ipairs(intervals) do
+		table.insert(timeline.bars, { from = interval.from + ping, to = interval.to + ping, lane = 1, color = COLORS.accent })
+	end
+
+	local result = { lines = {}, timeline = timeline }
+	local passed, worst = 0, nil
+
+	for index, hitTime in ipairs(hits) do
+		local state, gap = checkCoverage(intervals, hitTime, ping)
+		local ok = state == "BLOCKED"
+		if ok then
+			passed += 1
+		elseif not worst then
+			worst = { state = state, gap = gap, index = index }
+		end
+
+		table.insert(timeline.ticks, { at = hitTime, color = ok and COLORS.good or COLORS.bad })
+		if #hits > 1 then
+			table.insert(result.lines, string.format("Hit %d: %s%s", index, state, ok and string.format(" (+%d ms)", gap * 1000) or string.format(" (%d ms)", gap * 1000)))
+		end
+	end
+
+	result.ok = passed == #hits
+
+	if #hits > 1 then
+		result.title = string.format("%d/%d BLOCKED", passed, #hits)
+	elseif result.ok then
+		result.title = "BLOCKED"
+		local _, margin = checkCoverage(intervals, hits[1], ping)
+		table.insert(result.lines, string.format("Block was up %d ms of margin.", margin * 1000))
+	elseif worst and worst.state == "NONE" then
+		result.title = "NO BLOCK"
+		table.insert(result.lines, Settings.autoBlock and explainMiss(run.events) or "Auto Block is turned off.")
+	elseif worst and worst.state == "LATE" then
+		result.title = "TOO LATE"
+		table.insert(result.lines, string.format("Block landed %d ms after the hit: raise Block Lead.", worst.gap * 1000))
+	else
+		result.title = "RELEASED EARLY"
+		table.insert(result.lines, string.format("Block ended %d ms before the hit: raise Chain Tail or Hold Time.", (worst and worst.gap or 0) * 1000))
+	end
+
+	return result
+end
+
+---Run one lab test and return its result.
+---@param testName string
+---@param distance number
+---@return table
+local function runLabOnce(testName, distance)
+	local test = LAB_TESTS[testName]
+	local _, myRoot = getMe()
+	if not myRoot then
+		return { ok = false, title = "NO CHARACTER", lines = { "Spawn in first." } }
+	end
+
+	local dummy = getLabDummy()
+	if not dummy then
+		return { ok = false, title = "CLONE FAILED", lines = { "Could not copy your character." } }
+	end
+
+	local root = dummy:FindFirstChild("HumanoidRootPart")
+	local humanoid = dummy:FindFirstChildOfClass("Humanoid")
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	dummy.Parent = workspace:FindFirstChild("Live") or workspace
+
+	local look = flatten(myRoot.CFrame.LookVector)
+	local right = flatten(myRoot.CFrame.RightVector)
+	local origin = myRoot.Position
+
+	-- Where the target stands, which way it faces, and which way it moves.
+	local position, facing, motion
+	if testName == "Side Dash In" or testName == "Block: Side Dash" then
+		position, facing, motion = origin + right * distance, look, -right
+	elseif testName == "Side Dash Away" then
+		position, facing, motion = origin + right * 4, look, right
+	elseif testName == "Backdash" then
+		position, facing, motion = origin + look * distance, -look, look
+	elseif testName == "Front Dash" then
+		position, facing, motion = origin + look * distance, -look, -look
+	else
+		position, facing, motion = origin + look * Settings.labAttackDist, -look, Vector3.zero
+	end
+
+	local function place()
+		root.CFrame = CFrame.lookAt(position, position + facing)
+		root.AssemblyLinearVelocity = Vector3.zero
+	end
+
+	place()
+	-- Give Zenny a moment to notice the new target.
+	task.wait(0.35)
+	place()
+
+	if test.type == "dash" then
+		local id = getDashAnimationId(test.kind)
+		if not id then
+			return { ok = false, title = "NO ANIMATION", lines = { "No animation id known for this dash. Learn it first." } }
+		end
+
+		labRun = { t0 = os.clock(), events = {}, samples = {} }
+		local track = playLabTrack(animator, id)
+		if not track then
+			labRun = nil
+			return { ok = false, title = "NO ANIMATION", lines = { "The dash animation could not play on the target." } }
+		end
+
+		local startTime = os.clock()
+		while true do
+			local moving = os.clock() - startTime < LAB_DASH_TIME
+			local velocity = root.AssemblyLinearVelocity
+			root.AssemblyLinearVelocity = moving and Vector3.new(motion.X * Settings.labSpeed, velocity.Y, motion.Z * Settings.labSpeed)
+				or Vector3.new(0, velocity.Y, 0)
+
+			table.insert(labRun.samples, {
+				t = os.clock() - labRun.t0,
+				distance = ((root.Position - myRoot.Position) * Vector3.new(1, 0, 1)).Magnitude,
+			})
+
+			if os.clock() - startTime > LAB_DASH_TIME + 0.6 then
+				break
+			end
+			runService.Heartbeat:Wait()
+		end
+
+		local run = labRun
+		labRun = nil
+		track:Stop(0.1)
+
+		if test.block then
+			return evaluateSideBlock(run)
+		end
+
+		if test.kind == "FRONT" then
+			return evaluateFront(run)
+		end
+
+		return evaluateDash(run, test, distance)
+	end
+
+	-- Block tests: play one attack, or a string of attacks.
+	local ids = getAttackIds(testName)
+	if #ids == 0 then
+		return { ok = false, title = "NO ANIMATION", lines = { "No animation known for this move. Use its Learn button first." } }
+	end
+
+	local gap = 0.45
+	local starts, hits = {}, {}
+	for index, id in ipairs(ids) do
+		starts[index] = (index - 1) * gap
+		local learnedHit = moveData[id] and moveData[id].hit
+		hits[index] = starts[index] + (learnedHit or Settings.labHit)
+	end
+
+	labRun = { t0 = os.clock(), events = {}, samples = {} }
+	local tracks = {}
+	for index, id in ipairs(ids) do
+		task.delay(starts[index], function()
+			if labRun then
+				local track = playLabTrack(animator, id)
+				if track then
+					table.insert(tracks, track)
+				end
+			end
+		end)
+	end
+
+	task.wait(hits[#hits] + 0.7)
+
+	local run = labRun
+	labRun = nil
+	for _, track in ipairs(tracks) do
+		track:Stop(0.1)
+	end
+
+	if #tracks == 0 then
+		return { ok = false, title = "NO ANIMATION", lines = { "The animation could not play on the target." } }
+	end
+
+	return evaluateBlock(run, hits)
+end
+
+---Show the latest pass rate in the result text.
+---@return string
+local function getLabSummary()
+	if #labHistory == 0 then
+		return "No runs yet"
+	end
+
+	local passed = 0
+	for _, ok in ipairs(labHistory) do
+		if ok then
+			passed += 1
+		end
+	end
+
+	return string.format("Last %d runs: %d passed", #labHistory, passed)
+end
+
+---Run a lab test once, or a batch with a little random distance.
+---@param count number
+local function startLab(count)
+	if labRunning then
+		return
+	end
+
+	labRunning = true
+	task.spawn(function()
+		local testName = Settings.labTest
+		local ok, err = pcall(function()
+			table.clear(labHistory)
+			local passes, last = 0, nil
+
+			for index = 1, count do
+				local distance = Settings.labDistance
+				if count > 1 then
+					distance = math.clamp(distance + math.random(-2, 2), 3, 25)
+				end
+
+				last = runLabOnce(testName, distance)
+				table.insert(labHistory, last.ok == true)
+				if last.ok then
+					passes += 1
+				end
+
+				if labResultCallback then
+					local shown = table.clone(last)
+					if count > 1 then
+						shown.title = string.format("%s  (%d/%d)", last.title, passes, index)
+					end
+					shown.summary = getLabSummary()
+					labResultCallback(shown)
+				end
+
+				if index < count then
+					task.wait(0.8)
+				end
+			end
+
+			log(string.format("lab %s: %d/%d", testName, passes, count))
+		end)
+
+		labRun = nil
+		labRunning = false
+		removeLabDummy()
+
+		if not ok then
+			log("lab error: " .. tostring(err))
+			if labResultCallback then
+				labResultCallback({ ok = false, title = "LAB ERROR", lines = { tostring(err) }, summary = getLabSummary() })
+			end
+		end
+	end)
+end
+
+---Check whether an input is a click or touch.
+---@param input InputObject
+---@return boolean
+local function isPointer(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+end
+
+---Check whether an input is pointer movement.
+---@param input InputObject
+---@return boolean
+local function isPointerMove(input)
+	return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+end
+
+---Add rounded corners to a gui object.
+---@param parent GuiObject
+---@param radius number
+local function corner(parent, radius)
+	return newInstance("UICorner", { CornerRadius = UDim.new(0, radius) }, parent)
+end
+
+---Add a thin green outline to a gui object.
+---@param parent GuiObject
+---@param transparency number
+---@param thickness number?
+local function outline(parent, transparency, thickness)
+	return newInstance("UIStroke", {
+		Color = COLORS.accent,
+		Transparency = transparency,
+		Thickness = thickness or 1,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, parent)
+end
+
+local rowOrder = setmetatable({}, { __mode = "k" })
+local rowRegistry = {}
+local sectionHeaders = setmetatable({}, { __mode = "k" })
+local pageOfScroll = setmetatable({}, { __mode = "k" })
+local infoRows = {}
+
+---Get the next layout order for a parent.
+---@param parent Instance
+---@return number
+local function nextOrder(parent)
+	rowOrder[parent] = (rowOrder[parent] or 0) + 1
+	return rowOrder[parent]
+end
+
+---Register a refresh function for a setting; several rows can share one key.
+---@param key string
+---@param fn function
+local function registerRefresher(key, fn)
+	local previous = uiRefreshers[key]
+	uiRefreshers[key] = function(animated)
+		if previous then
+			pcall(previous, animated)
+		end
+
+		fn(animated)
+	end
+end
+
+---Add a press-scale effect to a gui object.
+---@param target GuiObject
+local function addPress(target)
+	local scale = newInstance("UIScale", { Scale = 1 }, target)
+
+	connect(target.InputBegan, function(input)
+		if isPointer(input) then
+			tween(scale, { Scale = 0.95 }, QUICK)
+		end
+	end)
+	connect(target.InputEnded, function(input)
+		if isPointer(input) then
+			tween(scale, { Scale = 1 }, QUICK)
+		end
+	end)
+end
+
+---Add a titled card to a page and return the card.
+---@param page ScrollingFrame
+---@param title string
+---@return Frame
+local function addSection(page, title)
+	local header = newInstance("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 18),
+		BackgroundTransparency = 1,
+		Text = string.upper(title),
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 11,
+		LayoutOrder = nextOrder(page),
+	}, page)
+
+	local card = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(page),
+	}, page)
+	corner(card, 14)
+	outline(card, 0.82)
+	newInstance("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, card)
+
+	sectionHeaders[card] = header
+	return card
+end
+
+---Create a row with a title and optional subtitle.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param className string
+---@return GuiObject, TextLabel
+local function createRow(card, title, subtitle, className)
+	local row = newInstance(className, {
+		Size = UDim2.new(1, 0, 0, subtitle and 48 or 40),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(card),
+	}, card)
+	if className == "TextButton" then
+		row.Text = ""
+		row.AutoButtonColor = false
+	end
+
+	local titleLabel = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, subtitle and 6 or 0),
+		Size = UDim2.new(0.55, -14, 0, subtitle and 20 or 40),
+		BackgroundTransparency = 1,
+		Text = title,
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 14,
+	}, row)
+
+	if subtitle then
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(14, 26),
+			Size = UDim2.new(0.55, -14, 0, 16),
+			BackgroundTransparency = 1,
+			Text = subtitle,
+			TextColor3 = COLORS.dim,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.Gotham,
+			TextSize = 11,
+		}, row)
+	end
+
+	newInstance("Frame", {
+		Position = UDim2.new(0, 14, 1, -1),
+		Size = UDim2.new(1, -28, 0, 1),
+		BackgroundColor3 = COLORS.accent,
+		BackgroundTransparency = 0.92,
+		BorderSizePixel = 0,
+	}, row)
+
+	table.insert(rowRegistry, { row = row, title = title:lower(), card = card })
+	return row, titleLabel
+end
+
+---Add a switch row bound to a boolean setting.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param key string
+local function addSwitch(card, title, subtitle, key)
+	local row = createRow(card, title, subtitle, "TextButton")
+
+	local track = newInstance("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(40, 22),
+		BorderSizePixel = 0,
+	}, row)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+
+	local knob = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Size = UDim2.fromOffset(16, 16),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, track)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+
+	local function refresh(animated)
+		local on = Settings[key]
+		local trackGoal = { BackgroundColor3 = on and COLORS.accent or COLORS.off }
+		local knobGoal = {
+			Position = on and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
+			BackgroundColor3 = on and COLORS.ink or COLORS.dim,
+		}
+
+		if animated then
+			tween(track, trackGoal)
+			tween(knob, knobGoal)
+			return
+		end
+
+		track.BackgroundColor3 = trackGoal.BackgroundColor3
+		knob.Position = knobGoal.Position
+		knob.BackgroundColor3 = knobGoal.BackgroundColor3
+	end
+
+	refresh(false)
+	registerRefresher(key, refresh)
+	connect(row.MouseButton1Click, function()
+		Settings[key] = not Settings[key]
+		refresh(true)
+		onSettingChanged(key)
+	end)
+end
+
+---Add a slider row bound to a number setting.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param key string
+---@param min number
+---@param max number
+---@param step number
+---@param suffix string
+local function addSlider(card, title, subtitle, key, min, max, step, suffix)
+	local row = createRow(card, title, subtitle, "Frame")
+	local scroll = card.Parent
+
+	local hit = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0.55, 0, 0.5, 0),
+		Size = UDim2.new(0.45, -86, 0, 30),
+		BackgroundTransparency = 1,
+		Active = true,
+	}, row)
+
+	local bar = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.new(1, 0, 0, 6),
+		BackgroundColor3 = COLORS.off,
+		BorderSizePixel = 0,
+	}, hit)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, bar)
+
+	local fill = newInstance("Frame", {
+		Size = UDim2.fromScale(0, 1),
+		BackgroundColor3 = COLORS.accent,
+		BorderSizePixel = 0,
+	}, bar)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, fill)
+
+	local knob = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.fromOffset(14, 14),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+	}, bar)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+
+	local value = newInstance("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(64, 20),
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+	}, row)
+
+	local function render(animated)
+		local alpha = math.clamp((Settings[key] - min) / (max - min), 0, 1)
+		if animated then
+			tween(fill, { Size = UDim2.fromScale(alpha, 1) }, QUICK)
+			tween(knob, { Position = UDim2.new(alpha, 0, 0.5, 0) }, QUICK)
+		else
+			fill.Size = UDim2.fromScale(alpha, 1)
+			knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+		end
+
+		value.Text = string.format("%g%s", Settings[key], suffix)
+	end
+
+	local function setFromX(x)
+		local alpha = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+		Settings[key] = math.floor((min + (max - min) * alpha) / step + 0.5) * step
+		render(true)
+	end
+
+	local dragging = false
+	render(false)
+	registerRefresher(key, render)
+
+	connect(hit.InputBegan, function(input)
+		if isPointer(input) then
+			dragging = true
+			scroll.ScrollingEnabled = false
+			setFromX(input.Position.X)
+		end
+	end)
+	connect(userInputService.InputChanged, function(input)
+		if dragging and isPointerMove(input) then
+			setFromX(input.Position.X)
+		end
+	end)
+	connect(userInputService.InputEnded, function(input)
+		if dragging and isPointer(input) then
+			dragging = false
+			scroll.ScrollingEnabled = true
+		end
+	end)
+end
+
+---Add a row that cycles through string options.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param key string
+---@param options table
+local function addCycle(card, title, subtitle, key, options)
+	local row = createRow(card, title, subtitle, "TextButton")
+
+	local value = newInstance("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(110, 20),
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.accent,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		Text = Settings[key],
+	}, row)
+
+	registerRefresher(key, function()
+		value.Text = Settings[key]
+	end)
+
+	connect(row.MouseButton1Click, function()
+		local index = table.find(options, Settings[key]) or 0
+		Settings[key] = options[index % #options + 1]
+		value.Text = Settings[key]
+	end)
+end
+
+---Add a row with an action button.
+---@param card Frame
+---@param title string
+---@param subtitle string?
+---@param buttonText string
+---@param callback function
+local function addAction(card, title, subtitle, buttonText, callback)
+	local row = createRow(card, title, subtitle, "Frame")
+
+	local button = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(92, 26),
+		BackgroundColor3 = COLORS.accent,
+		Text = buttonText,
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, row)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, button)
+	addPress(button)
+	connect(button.MouseButton1Click, callback)
+end
+
+---Add a row showing text that refreshes twice a second.
+---@param card Frame
+---@param title string
+---@param getText function
+local function addInfo(card, title, getText)
+	local row = createRow(card, title, nil, "Frame")
+
+	local value = newInstance("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.new(0.45, 0, 0, 20),
+		BackgroundTransparency = 1,
+		Text = getText(),
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+	}, row)
+
+	table.insert(infoRows, { label = value, get = getText })
+end
+
+---Count the learned ids of a move.
+---@param name string
+---@return number
+local function countLearned(name)
+	local count = 0
+	for _ in pairs(learned[name]) do
+		count += 1
+	end
+
+	return count
+end
+
+---Format seconds as a short runtime.
+---@param seconds number
+---@return string
+local function formatRuntime(seconds)
+	seconds = math.floor(seconds)
+	if seconds >= 3600 then
+		return string.format("%dh %02dm", seconds // 3600, (seconds % 3600) // 60)
+	end
+
+	return string.format("%dm %02ds", seconds // 60, seconds % 60)
+end
+
+local INDICATOR_LIST = {
+	{ "autoBlock", "Auto Block" },
+	{ "adaptiveBlock", "Adaptive Timing" },
+	{ "autoEvasive", "Auto Evasive" },
+	{ "consecBlock", "Consec Block" },
+	{ "shoveM1", "Shove M1" },
+	{ "catchEnabled", "Side Dash M1" },
+	{ "bdcEnabled", "Backdash M1" },
+	{ "frontBlock", "Front Dash Block" },
+	{ "catchFace", "Lock" },
+	{ "techLoop", "Tech" },
+	{ "counterBait", "Counter Bait" },
+}
+
+---Build the window, pages, quick pills and indicators.
+local function buildGui()
+	gui = newInstance("ScreenGui", { Name = "Slotted", ResetOnSpawn = false, DisplayOrder = 50 }, nil)
+
+	local parented = pcall(function()
+		gui.Parent = (gethui and gethui()) or coreGuiService
+	end)
+	if not parented or not gui.Parent then
+		gui.Parent = playerGui
+	end
+
+	holder = newInstance("Folder", { Name = "ZennyObjects" }, gui)
+
+	local loadedAt = os.clock()
+	local camera = workspace.CurrentCamera
+	local viewport = camera and camera.ViewportSize or Vector2.new(800, 400)
+	local width = math.min(viewport.X - 24, 720)
+	local height = math.min(viewport.Y - 24, 380)
+	local mainWidth = width - 20
+
+	local window = newInstance("CanvasGroup", {
+		Name = "Window",
+		Size = UDim2.fromOffset(width, height),
+		Position = UDim2.fromOffset(math.floor((viewport.X - width) / 2), math.floor((viewport.Y - height) / 2)),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BackgroundTransparency = 0.04,
+		BorderSizePixel = 0,
+		GroupTransparency = 1,
+		Visible = false,
+	}, gui)
+	corner(window, 24)
+	newInstance("UIGradient", {
+		Rotation = 135,
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(14, 14, 14)),
+			ColorSequenceKeypoint.new(0.55, Color3.fromRGB(0, 0, 0)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(18, 18, 18)),
+		}),
+	}, window)
+
+	-- Glowing edge that fades from the bottom left like the mockup.
+	local edge = newInstance("UIStroke", { Color = COLORS.accent, Thickness = 2, Transparency = 0 }, window)
+	newInstance("UIGradient", {
+		Rotation = 45,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.05),
+			NumberSequenceKeypoint.new(0.5, 0.85),
+			NumberSequenceKeypoint.new(1, 0.4),
+		}),
+	}, edge)
+	local windowScale = newInstance("UIScale", { Scale = 0.94 }, window)
+
+	-- Soft inner glow along the window border and a faint light from the top.
+	local innerGlow = newInstance("Frame", {
+		Name = "InnerGlow",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+	}, window)
+	corner(innerGlow, 24)
+	newInstance("UIStroke", { Color = COLORS.accent, Thickness = 10, Transparency = 0.93 }, innerGlow)
+	local topLight = newInstance("Frame", {
+		Name = "TopLight",
+		Size = UDim2.new(1, 0, 0, 110),
+		BackgroundColor3 = COLORS.accent,
+		BorderSizePixel = 0,
+	}, window)
+	newInstance("UIGradient", {
+		Rotation = 90,
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.9),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+	}, topLight)
+
+	-- White particles drifting in the background; each one has a halo that twinkles.
+	local particleLayer = newInstance("Frame", {
+		Name = "Particles",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+	}, window)
+	local particles = {}
+	for index = 1, 36 do
+		local size = math.random(2, 4)
+		local dot = newInstance("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Size = UDim2.fromOffset(size, size),
+			BackgroundColor3 = COLORS.accent,
+			BackgroundTransparency = 0.3,
+			BorderSizePixel = 0,
+		}, particleLayer)
+		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, dot)
+		local halo = newInstance("Frame", {
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Size = UDim2.fromOffset(size * 6, size * 6),
+			BackgroundColor3 = COLORS.accent,
+			BackgroundTransparency = 0.92,
+			BorderSizePixel = 0,
+		}, dot)
+		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, halo)
+
+		particles[index] = {
+			dot = dot,
+			halo = halo,
+			x = math.random(),
+			y = math.random(),
+			vx = (math.random() - 0.5) * 0.02,
+			vy = -(0.008 + math.random() * 0.03),
+			phase = math.random() * 6.28,
+			speed = 0.6 + math.random() * 1.6,
+		}
+	end
+
+	local glowClock = 0
+	connect(runService.Heartbeat, function(delta)
+		if not window.Visible then
+			return
+		end
+
+		glowClock += delta
+		for _, particle in ipairs(particles) do
+			particle.x = (particle.x + particle.vx * delta) % 1
+			particle.y = (particle.y + particle.vy * delta) % 1
+			local twinkle = 0.5 + 0.5 * math.sin(glowClock * particle.speed + particle.phase)
+			particle.dot.Position = UDim2.fromScale(particle.x, particle.y)
+			particle.dot.BackgroundTransparency = 0.8 - 0.65 * twinkle
+			particle.halo.BackgroundTransparency = 0.96 - 0.1 * twinkle
+		end
+
+		edge.Transparency = 0.05 + 0.2 * (0.5 + 0.5 * math.sin(glowClock * 1.4))
+	end)
+
+	-- Main area: top bar and pages.
+	local main = newInstance("Frame", {
+		Position = UDim2.fromOffset(10, 10),
+		Size = UDim2.new(1, -20, 1, -20),
+		BackgroundTransparency = 1,
+	}, window)
+
+	local topBar = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 40),
+		BackgroundTransparency = 1,
+		Active = true,
+	}, main)
+
+	-- Logo; dragging it moves the window like the top bar.
+	local logoRow = newInstance("Frame", {
+		Size = UDim2.fromOffset(112, 40),
+		BackgroundTransparency = 1,
+		Active = true,
+	}, topBar)
+	local badge = newInstance("Frame", {
+		Position = UDim2.fromOffset(2, 6),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundColor3 = COLORS.accent,
+		BorderSizePixel = 0,
+	}, logoRow)
+	corner(badge, 8)
+	newInstance("UIGradient", {
+		Rotation = 90,
+		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), COLORS.accentDark),
+	}, badge)
+	newInstance("UIStroke", { Color = COLORS.accent, Thickness = 3, Transparency = 0.8 }, badge)
+	newInstance("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Text = "S",
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 18,
+	}, badge)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(38, 0),
+		Size = UDim2.new(1, -38, 1, 0),
+		BackgroundTransparency = 1,
+		Text = "Slotted",
+		TextColor3 = COLORS.text,
+		TextStrokeColor3 = COLORS.accent,
+		TextStrokeTransparency = 0.8,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 19,
+	}, logoRow)
+
+	local search = newInstance("Frame", {
+		Size = UDim2.new(1, -(118 + 240), 0, 34),
+		Position = UDim2.fromOffset(118, 3),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, topBar)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, search)
+	outline(search, 0.75)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(12, 0),
+		Size = UDim2.fromOffset(20, 34),
+		BackgroundTransparency = 1,
+		Text = "🔍",
+		TextColor3 = COLORS.dim,
+		TextSize = 14,
+		Font = Enum.Font.Gotham,
+	}, search)
+	local searchBox = newInstance("TextBox", {
+		Position = UDim2.fromOffset(36, 0),
+		Size = UDim2.new(1, -44, 1, 0),
+		BackgroundTransparency = 1,
+		PlaceholderText = "Search features...",
+		PlaceholderColor3 = COLORS.dim,
+		Text = "",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		ClearTextOnFocus = false,
+		Font = Enum.Font.Gotham,
+		TextSize = 13,
+	}, search)
+
+	-- Window controls on the far right.
+	local closeButton = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, 0, 0.5, 0),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundTransparency = 1,
+		Text = "✕",
+		TextColor3 = COLORS.dim,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		AutoButtonColor = false,
+	}, topBar)
+	local minimizeButton = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -30, 0.5, 0),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundTransparency = 1,
+		Text = "—",
+		TextColor3 = COLORS.dim,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		AutoButtonColor = false,
+	}, topBar)
+
+	-- User chip.
+	local chip = newInstance("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -62, 0.5, 0),
+		Size = UDim2.fromOffset(132, 36),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, topBar)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, chip)
+	outline(chip, 0.75)
+
+	local avatar = newInstance("ImageLabel", {
+		Position = UDim2.fromOffset(4, 4),
+		Size = UDim2.fromOffset(28, 28),
+		BackgroundColor3 = COLORS.off,
+		Image = string.format("rbxthumb://type=AvatarHeadShot&id=%d&w=150&h=150", localPlayer.UserId),
+		BorderSizePixel = 0,
+	}, chip)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, avatar)
+	outline(avatar, 0.2, 1.5)
+
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(38, 3),
+		Size = UDim2.new(1, -44, 0, 16),
+		BackgroundTransparency = 1,
+		Text = localPlayer.DisplayName,
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+	}, chip)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(38, 18),
+		Size = UDim2.new(1, -44, 0, 14),
+		BackgroundTransparency = 1,
+		Text = "● Online",
+		TextColor3 = COLORS.accent,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Gotham,
+		TextSize = 10,
+	}, chip)
+
+	local bell = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -200, 0.5, 0),
+		Size = UDim2.fromOffset(32, 32),
+		BackgroundTransparency = 1,
+		Text = "🔔",
+		TextColor3 = COLORS.dim,
+		Font = Enum.Font.Gotham,
+		TextSize = 16,
+		AutoButtonColor = false,
+	}, topBar)
+
+	-- Horizontal tab strip under the top bar.
+	local nav = newInstance("ScrollingFrame", {
+		Position = UDim2.fromOffset(0, 44),
+		Size = UDim2.new(1, 0, 0, 34),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 0,
+		AutomaticCanvasSize = Enum.AutomaticSize.X,
+		CanvasSize = UDim2.new(),
+		ScrollingDirection = Enum.ScrollingDirection.X,
+	}, main)
+	newInstance("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 6),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+	}, nav)
+	newInstance("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 2) }, nav)
+
+	local unload = newInstance("TextButton", {
+		Size = UDim2.fromOffset(70, 28),
+		BackgroundTransparency = 1,
+		Text = "Unload",
+		TextColor3 = COLORS.accent,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		AutoButtonColor = false,
+		LayoutOrder = 99,
+	}, nav)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, unload)
+	outline(unload, 0.4, 1.5)
+	addPress(unload)
+	connect(unload.MouseButton1Click, function()
+		Zenny.detach()
+	end)
+
+	local content = newInstance("Frame", {
+		Position = UDim2.fromOffset(0, 84),
+		Size = UDim2.new(1, 0, 1, -84),
+		BackgroundTransparency = 1,
+	}, main)
+
+	-- Tabs and pages.
+	local tabs = {}
+	local tabOrder = {}
+	local activeTab = nil
+
+	local function selectTab(name)
+		activeTab = name
+		for tabName, entry in pairs(tabs) do
+			local active = tabName == name
+			if active then
+				entry.page.Visible = true
+			else
+				task.delay(0.22, function()
+					if activeTab ~= tabName then
+						entry.page.Visible = false
+					end
+				end)
+			end
+
+			tween(entry.page, { GroupTransparency = active and 0 or 1 })
+			tween(entry.tab, {
+				BackgroundTransparency = active and 0.88 or 1,
+				TextColor3 = active and COLORS.text or COLORS.dim,
+			})
+			tween(entry.indicator, { BackgroundTransparency = active and 0 or 1 })
+		end
+	end
+
+	local function addPage(name, order, icon)
+		local tab = newInstance("TextButton", {
+			Size = UDim2.fromOffset(0, 28),
+			AutomaticSize = Enum.AutomaticSize.X,
+			BackgroundColor3 = COLORS.accent,
+			BackgroundTransparency = 1,
+			Text = icon .. "  " .. name,
+			TextColor3 = COLORS.dim,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 13,
+			AutoButtonColor = false,
+			LayoutOrder = order,
+		}, nav)
+		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, tab)
+		newInstance("UIPadding", { PaddingLeft = UDim.new(0, 14), PaddingRight = UDim.new(0, 14) }, tab)
+
+		local indicator = newInstance("Frame", {
+			AnchorPoint = Vector2.new(0.5, 1),
+			Position = UDim2.new(0.5, 0, 1, 0),
+			Size = UDim2.new(0.5, 0, 0, 2),
+			BackgroundColor3 = COLORS.accent,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+		}, tab)
+		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, indicator)
+
+		local page = newInstance("CanvasGroup", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			GroupTransparency = 1,
+			Visible = false,
+		}, content)
+		local scroll = newInstance("ScrollingFrame", {
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			ScrollBarThickness = 0,
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			CanvasSize = UDim2.new(),
+			ScrollingDirection = Enum.ScrollingDirection.Y,
+		}, page)
+		newInstance("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }, scroll)
+		newInstance("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 12), PaddingRight = UDim.new(0, 2) }, scroll)
+
+		tabs[name] = { tab = tab, page = page, indicator = indicator }
+		pageOfScroll[scroll] = name
+		table.insert(tabOrder, name)
+		connect(tab.MouseButton1Click, function()
+			selectTab(name)
+		end)
+
+		return scroll
+	end
+
+	-- Home.
+	local home = addPage("Home", 0, "🏠")
+
+	local hero = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 162),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+		LayoutOrder = 1,
+	}, home)
+	corner(hero, 20)
+	outline(hero, 0.7)
+	newInstance("UIGradient", {
+		Rotation = 20,
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, Color3.fromRGB(0, 0, 0)),
+			ColorSequenceKeypoint.new(1, Color3.fromRGB(30, 30, 30)),
+		}),
+	}, hero)
+
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(20, 12),
+		Size = UDim2.fromOffset(200, 20),
+		BackgroundTransparency = 1,
+		Text = "Welcome to",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Gotham,
+		TextSize = 15,
+	}, hero)
+	local heroTitle = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(20, 30),
+		Size = UDim2.fromOffset(240, 46),
+		BackgroundTransparency = 1,
+		Text = "Slotted",
+		TextColor3 = Color3.new(1, 1, 1),
+		TextStrokeColor3 = COLORS.accent,
+		TextStrokeTransparency = 0.85,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 42,
+	}, hero)
+	newInstance("UIGradient", {
+		Rotation = 90,
+		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), COLORS.accentDark),
+	}, heroTitle)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(20, 80),
+		Size = UDim2.fromOffset(260, 20),
+		BackgroundTransparency = 1,
+		Text = "Smarter. Faster. Stronger.",
+		TextColor3 = COLORS.accent,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+	}, hero)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(20, 102),
+		Size = UDim2.fromOffset(250, 16),
+		BackgroundTransparency = 1,
+		Text = "Your TSB combat assistant.",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+	}, hero)
+
+	local getStarted = newInstance("TextButton", {
+		Position = UDim2.fromOffset(20, 124),
+		Size = UDim2.fromOffset(118, 30),
+		BackgroundColor3 = COLORS.accent,
+		Text = "Get Started  ➜",
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, hero)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, getStarted)
+	addPress(getStarted)
+
+	local explore = newInstance("TextButton", {
+		Position = UDim2.fromOffset(146, 124),
+		Size = UDim2.fromOffset(116, 30),
+		BackgroundTransparency = 1,
+		Text = "Explore Tools",
+		TextColor3 = COLORS.text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, hero)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, explore)
+	outline(explore, 0.4, 1.5)
+	addPress(explore)
+
+	-- Orbit ring around a big Z, like the logo in the mockup.
+	local emblem = newInstance("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -26, 0.5, 0),
+		Size = UDim2.fromOffset(132, 132),
+		BackgroundTransparency = 1,
+	}, hero)
+	local glow = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(96, 96),
+		BackgroundColor3 = COLORS.accent,
+		BackgroundTransparency = 0.88,
+		BorderSizePixel = 0,
+	}, emblem)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, glow)
+	local ring = newInstance("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(128, 128),
+		BackgroundTransparency = 1,
+	}, emblem)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, ring)
+	local ringStroke = outline(ring, 0, 3)
+	newInstance("UIGradient", {
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0),
+			NumberSequenceKeypoint.new(0.55, 0.9),
+			NumberSequenceKeypoint.new(1, 0),
+		}),
+	}, ringStroke)
+	local bigZ = newInstance("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Text = "S",
+		TextColor3 = Color3.new(1, 1, 1),
+		Font = Enum.Font.GothamBlack,
+		TextSize = 78,
+	}, emblem)
+	newInstance("UIGradient", {
+		Rotation = 90,
+		Color = ColorSequence.new(Color3.fromRGB(255, 255, 255), COLORS.accentDark),
+	}, bigZ)
+
+	connect(runService.RenderStepped, function(delta)
+		ring.Rotation = (ring.Rotation + delta * 40) % 360
+	end)
+
+	connect(getStarted.MouseButton1Click, function()
+		selectTab("Combat")
+	end)
+	connect(explore.MouseButton1Click, function()
+		selectTab("Dashes")
+	end)
+
+	-- Stat cards.
+	local statsRow = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 66),
+		BackgroundTransparency = 1,
+		LayoutOrder = 2,
+	}, home)
+	newInstance("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 8),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, statsRow)
+
+	---Build one stat card with a value and a small bar chart.
+	---@param order number
+	---@param icon string
+	---@param title string
+	---@param barCount number
+	---@return TextLabel, table
+	local function addStat(order, icon, title, barCount)
+		local card = newInstance("Frame", {
+			Size = UDim2.new(1 / 3, -6, 1, 0),
+			BackgroundColor3 = COLORS.card,
+			BackgroundTransparency = 0.2,
+			BorderSizePixel = 0,
+			LayoutOrder = order,
+		}, statsRow)
+		corner(card, 14)
+		outline(card, 0.8)
+
+		local box = newInstance("TextLabel", {
+			Position = UDim2.fromOffset(10, 15),
+			Size = UDim2.fromOffset(36, 36),
+			BackgroundColor3 = COLORS.off,
+			Text = icon,
+			TextColor3 = COLORS.accent,
+			Font = Enum.Font.GothamBold,
+			TextSize = 16,
+		}, card)
+		corner(box, 10)
+
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(54, 12),
+			Size = UDim2.new(0.5, -40, 0, 14),
+			BackgroundTransparency = 1,
+			Text = title,
+			TextColor3 = COLORS.dim,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.Gotham,
+			TextSize = 10,
+		}, card)
+		local value = newInstance("TextLabel", {
+			Position = UDim2.fromOffset(54, 28),
+			Size = UDim2.new(0.5, -40, 0, 26),
+			BackgroundTransparency = 1,
+			Text = "-",
+			TextColor3 = COLORS.text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.GothamBold,
+			TextSize = 17,
+		}, card)
+
+		local bars = newInstance("Frame", {
+			AnchorPoint = Vector2.new(1, 1),
+			Position = UDim2.new(1, -10, 1, -10),
+			Size = UDim2.new(0.34, 0, 0, 34),
+			BackgroundTransparency = 1,
+		}, card)
+		newInstance("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			VerticalAlignment = Enum.VerticalAlignment.Bottom,
+			Padding = UDim.new(0, 2),
+		}, bars)
+
+		local list = {}
+		for index = 1, barCount do
+			local bar = newInstance("Frame", {
+				Size = UDim2.new(1 / barCount, -2, 0.2, 0),
+				BackgroundColor3 = COLORS.accent,
+				BackgroundTransparency = 0.2,
+				BorderSizePixel = 0,
+				LayoutOrder = index,
+			}, bars)
+			newInstance("UICorner", { CornerRadius = UDim.new(0, 2) }, bar)
+			list[index] = bar
+		end
+
+		return value, list
+	end
+
+	local fpsValue, fpsBars = addStat(1, "⚡", "FPS", 8)
+	local moduleValue, moduleBars = addStat(2, "▣", "Active Modules", 8)
+	local runtimeValue, runtimeBars = addStat(3, "🕒", "Runtime", 8)
+
+	-- Quick actions and system status.
+	local lowerRow = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 126),
+		BackgroundTransparency = 1,
+		LayoutOrder = 3,
+	}, home)
+	newInstance("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 8),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, lowerRow)
+
+	local quickCard = newInstance("Frame", {
+		Size = UDim2.new(0.66, -4, 1, 0),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+		LayoutOrder = 1,
+	}, lowerRow)
+	corner(quickCard, 14)
+	outline(quickCard, 0.8)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 8),
+		Size = UDim2.fromOffset(140, 22),
+		BackgroundTransparency = 1,
+		Text = "Quick Actions",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+	}, quickCard)
+	local viewAll = newInstance("TextButton", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -12, 0, 8),
+		Size = UDim2.fromOffset(70, 22),
+		BackgroundTransparency = 1,
+		Text = "View All ➜",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		AutoButtonColor = false,
+	}, quickCard)
+	connect(viewAll.MouseButton1Click, function()
+		selectTab("Combat")
+	end)
+
+	local tileGrid = newInstance("Frame", {
+		Position = UDim2.fromOffset(10, 34),
+		Size = UDim2.new(1, -20, 1, -42),
+		BackgroundTransparency = 1,
+	}, quickCard)
+	local tileWidth = math.max(math.floor((mainWidth * 0.66 - 4 - 20 - 18) / 4), 44)
+	newInstance("UIGridLayout", {
+		CellSize = UDim2.fromOffset(tileWidth, 78),
+		CellPadding = UDim2.fromOffset(6, 6),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, tileGrid)
+
+	local tiles = {}
+	for index, info in ipairs({
+		{ "Auto Block", "autoBlock", "🛡" },
+		{ "Side Dash M1", "catchEnabled", "💨" },
+		{ "Backdash M1", "bdcEnabled", "⏪" },
+		{ "Front Dash Block", "frontBlock", "⚡" },
+	}) do
+		local tile = newInstance("TextButton", {
+			BackgroundColor3 = COLORS.off,
+			BackgroundTransparency = 0.45,
+			Text = "",
+			AutoButtonColor = false,
+			LayoutOrder = index,
+		}, tileGrid)
+		corner(tile, 12)
+		local tileStroke = outline(tile, 0.85)
+		addPress(tile)
+
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(8, 6),
+			Size = UDim2.fromOffset(28, 26),
+			BackgroundTransparency = 1,
+			Text = info[3],
+			TextColor3 = COLORS.accent,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Font = Enum.Font.Gotham,
+			TextSize = 20,
+		}, tile)
+		newInstance("TextLabel", {
+			Position = UDim2.fromOffset(8, 36),
+			Size = UDim2.new(1, -12, 0, 34),
+			BackgroundTransparency = 1,
+			Text = info[1],
+			TextColor3 = COLORS.text,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextYAlignment = Enum.TextYAlignment.Top,
+			TextWrapped = true,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 11,
+		}, tile)
+
+		tiles[index] = { tile = tile, stroke = tileStroke, key = info[2] }
+		connect(tile.MouseButton1Click, function()
+			Settings[info[2]] = not Settings[info[2]]
+			local refresh = uiRefreshers[info[2]]
+			if refresh then
+				refresh(true)
+			end
+			onSettingChanged(info[2])
+		end)
+	end
+
+	local statusCard = newInstance("Frame", {
+		Size = UDim2.new(0.34, -4, 1, 0),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+		LayoutOrder = 2,
+	}, lowerRow)
+	corner(statusCard, 14)
+	outline(statusCard, 0.8)
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 8),
+		Size = UDim2.new(1, -28, 0, 22),
+		BackgroundTransparency = 1,
+		Text = "System Status",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+	}, statusCard)
+	local statusDot = newInstance("Frame", {
+		Position = UDim2.fromOffset(14, 42),
+		Size = UDim2.fromOffset(8, 8),
+		BackgroundColor3 = COLORS.accent,
+		BorderSizePixel = 0,
+	}, statusCard)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, statusDot)
+	local statusText = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(28, 36),
+		Size = UDim2.new(1, -36, 0, 20),
+		BackgroundTransparency = 1,
+		Text = "All Systems Operational",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+	}, statusCard)
+	local statusDetail = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 62),
+		Size = UDim2.new(1, -28, 0, 50),
+		BackgroundTransparency = 1,
+		Text = "",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		TextWrapped = true,
+		Font = Enum.Font.Gotham,
+		TextSize = 10,
+	}, statusCard)
+
+	-- Combat.
+	local combat = addPage("Combat", 1, "⚔️")
+
+	local block = addSection(combat, "Auto Block")
+	addSwitch(block, "Auto Block", "Hold F when an attack starts", "autoBlock")
+	addSwitch(block, "Adaptive Timing", "Learns when each move lands", "adaptiveBlock")
+	addSwitch(block, "Hold Through Move", "Keep blocking until it ends", "blockFull")
+	addSwitch(block, "Broad Detection", "Count any one-shot move", "broadDetect")
+	addSwitch(block, "Face Attacker", "Turn toward them while blocking", "blockFace")
+	addSlider(block, "Range", "How close they must be", "blockRange", 8, 40, 1, " studs")
+	addSlider(block, "Hold Time", "Minimum time F is held", "blockHold", 0.1, 1, 0.05, "s")
+	addSlider(block, "Block Lead", "React this early", "blockLead", 0, 0.3, 0.01, "s")
+	addSlider(block, "Chain Tail", "Extra hold after a move", "blockTail", 0, 0.6, 0.05, "s")
+	addSwitch(block, "Front Dash Block", "Block until their front dash ends", "frontBlock")
+	addSwitch(block, "Front Dash M1", "M1 when their front dash ends", "frontM1")
+	addSlider(block, "Front Dash Hold", "Longest block, 0 holds until it ends", "frontMaxHold", 0, 3, 0.1, "s")
+	addSwitch(block, "Consec Block", "Hold F during consecutive punches", "consecBlock")
+	addSlider(block, "Consec Chance", "Chance to react to a barrage", "consecChance", 0, 100, 5, "%")
+	addAction(block, "Learn Consec", "Then use your own consec", "Learn", function()
+		learning = "barrage"
+		log("learning consec: use your consecutive punches now")
+	end)
+	addAction(block, "Learn Front Dash", "Then front dash yourself", "Learn", function()
+		learning = "front"
+		log("learning front dash: front dash now")
+	end)
+	addInfo(block, "Learned", function()
+		if learning == "barrage" or learning == "front" then
+			return "waiting..."
+		end
+
+		return string.format("consec %d, front %d ids", countLearned("barrage"), countLearned("front"))
+	end)
+
+	local evade = addSection(combat, "Auto Evasive")
+	addSwitch(evade, "Enabled", "Spams dash to cancel ragdoll", "autoEvasive")
+	addCycle(evade, "Mode", "When it triggers", "evasiveMode", { "Ragdoll", "Consec", "Both" })
+	addCycle(evade, "Direction", "Dash direction", "evasiveDirection", { "Back", "Left", "Right" })
+	addSwitch(evade, "Hold Block", "Hold F while spamming", "evasiveBlock")
+	addSlider(evade, "Spam Rate", "Seconds between dashes", "evasiveRate", 0.02, 0.2, 0.01, "s")
+
+	local shove = addSection(combat, "Shove Auto M1")
+	addSwitch(shove, "Enabled", "M1 when a shove is seen", "shoveM1")
+	addSwitch(shove, "Also Block", "Block shoves too", "blockShove")
+	addSlider(shove, "M1 Delay", "Wait before M1", "shoveDelay", 0, 0.5, 0.01, "s")
+	addSlider(shove, "Range", "How close they must be", "shoveRange", 5, 40, 1, " studs")
+	addAction(shove, "Learn Move", "Then use your own shove", "Learn", function()
+		learning = "shove"
+		log("learning shove: use your shove now")
+	end)
+	addInfo(shove, "Learned", function()
+		return learning == "shove" and "waiting..." or (countLearned("shove") .. " ids")
+	end)
+
+	-- Macros and Assist pages. Scoped so their sections do not count against the function's locals.
+	do
+		local macroPage = addPage("Macros", 3, "⚡")
+		local assistPage = addPage("Assist", 6, "🎯")
+
+		local loop = addSection(macroPage, "Loop Dash")
+		addSwitch(loop, "Loop Dash", "Circle dash between hits to keep the combo going", "loopDash")
+		addSlider(loop, "After Hit", "Loop after this many hits", "loopHits", 1, 8, 1, "")
+		addSlider(loop, "Dash Delay", "Wait after the hit before dashing", "loopDelay", 0.05, 0.6, 0.01, "s")
+		addSlider(loop, "Follow Up", "Pause after the dash before swinging", "loopFollow", 0.05, 0.8, 0.01, "s")
+
+		local bdc = addSection(macroPage, "Backdash Cancel")
+		addSwitch(bdc, "Backdash Cancel", "Cancel the endlag with a back dash, then come back in", "bdcMacro")
+		addSlider(bdc, "After Hit", "Cancel after this many hits", "bdcHits", 1, 8, 1, "")
+		addSlider(bdc, "Back Dash Delay", "Wait after the hit", "cancelDelay", 0.05, 0.8, 0.01, "s")
+		addSlider(bdc, "Return Delay", "Wait before the front dash back in", "bdcReturn", 0.1, 1.2, 0.01, "s")
+		addInfo(bdc, "Macro", function()
+			return Bot.macroRun and Bot.macroRun.name or "idle"
+		end)
+
+		local techs = addSection(macroPage, "Front Dash Techs")
+		addSwitch(techs, "Bullet Dash", "Front dash straight at them", "bulletDash")
+		addSwitch(techs, "Skibidi Dash", "Front dash aimed at their back", "skibidiDash")
+		addSlider(techs, "Skibidi Offset", "How far behind them to aim", "skibidiOffset", 1, 10, 0.5, " studs")
+		addSlider(techs, "Front Dash Min", "Closest distance for a bullet or skibidi", "bulletMin", 8, 40, 1, " studs")
+		addSlider(techs, "Front Dash Max", "Farthest distance for a bullet or skibidi", "bulletMax", 14, 60, 1, " studs")
+		addSwitch(techs, "Surprise Tech", "Throw one out of neutral while strafing", "surprise")
+		addSlider(techs, "Surprise Every", "Average time between surprises", "surpriseEvery", 2, 20, 0.5, "s")
+
+		local adapter = addSection(macroPage, "Adapter")
+		addSwitch(adapter, "Adapter", "Learn what works on this opponent as the fight goes", "adapterOn")
+		addSlider(adapter, "Judge Window", "Time to see if a tech worked", "techWindow", 0.5, 4, 0.1, "s")
+		addInfo(adapter, "Last Tech", function()
+			return Bot.lastTech
+		end)
+		addInfo(adapter, "Best Overall", Bot.adaptSummary)
+		addInfo(adapter, "Opponent", function()
+			local entry = Bot.target and Bot.adapt[Bot.target.Name]
+			if not entry then
+				return "none"
+			end
+
+			return string.format("blocks %d%%, swings %d%%", math.floor(entry.block * 100 + 0.5), math.floor(entry.aggro * 100 + 0.5))
+		end)
+		addAction(adapter, "Reset Adapter", "Forget every tech result", "Reset", function()
+			for name in pairs(table.clone(Bot.adapt)) do
+				Bot.adapt[name] = nil
+			end
+			Bot.lastTech = "none yet"
+		end)
+
+		local tips = addSection(macroPage, "Competitive Tips")
+		for _, tip in ipairs(Bot.tips) do
+			addSwitch(tips, tip.title, tip.short, tip.key)
+		end
+		addSlider(tips, "Long Arm Chance", "Surprise long arms", "longArmChance", 0, 60, 5, "%")
+		addSlider(tips, "Long Arm + Backlash", "Chance while Backlash is up", "longArmBacklash", 0, 80, 5, "%")
+		addCycle(tips, "Backlash", "Auto reads the cooldown bar", "backlashMode", { "Auto", "Always", "Never" })
+		addSlider(tips, "Hook Away Angle", "How far a hook bends away", "hookAwayAngle", 10, 90, 5, "°")
+		addSlider(tips, "Hook Window", "Side dash this soon after M1 is a hook", "hookWindow", 0.2, 1, 0.05, "s")
+		addSwitch(tips, "Fade Counter Dash", "Dash out when they counter dash", "hookFade")
+
+		local combos = addSection(macroPage, "Custom Combos")
+		addCycle(combos, "Slot", "Slot to record or play", "comboSlot", Bot.allSlots)
+		addAction(combos, "Record", "Then do your combo", "Record", function()
+			Bot.startRecording()
+		end)
+		addAction(combos, "Stop", "Also stops after 2.5s idle", "Stop", function()
+			Bot.stopRecording()
+		end)
+		addAction(combos, "Play", "On your lock target (G)", "Play", function()
+			Bot.playSelected()
+		end)
+		addAction(combos, "Clear", "Delete the slot", "Clear", function()
+			Bot.combos[Settings.comboSlot] = nil
+		end)
+		addInfo(combos, "Slot Info", function()
+			if Bot.recording then
+				return string.format("recording: %d inputs", #Bot.recording.events)
+			end
+
+			local combo = Bot.combos[Settings.comboSlot]
+			return combo and string.format("%d inputs, %.2fs", #combo.events, combo.length) or "empty"
+		end)
+		addSwitch(combos, "Bot Uses Combos", "Play them when pressing in", "comboUse")
+		addCycle(combos, "Bot Mode", "Selected slot or rotate all", "comboUseMode", { "Selected", "Rotate" })
+		addSlider(combos, "Start Range", "Combo only inside this", "comboRange", 4, 20, 1, " studs")
+		addSlider(combos, "Cooldown", "Between combos", "comboCooldown", 0.5, 8, 0.5, "s")
+		addSwitch(combos, "Cancel To Block", "Stop mid combo to block", "comboCancel")
+
+		local lock = addSection(assistPage, "Lock On")
+		addInfo(lock, "Locked", function()
+			return Bot.lockOn and (Bot.lockTarget and Bot.lockTarget.Name or "searching") or "off"
+		end)
+		addAction(lock, "Lock", "Toggle with C", "Toggle", function()
+			Bot.setLock(not Bot.lockOn)
+		end)
+		addAction(lock, "Next Target", "Cycle with V", "Next", function()
+			Bot.cycleLock()
+		end)
+		addSwitch(lock, "Quick Buttons", "Touch pad on the right edge", "padVisible")
+		addSwitch(lock, "Camera Lock", "Turn the camera at them", "lockCamera")
+		addSwitch(lock, "Face Them", "Turn your character at them", "lockFaceChar")
+		addSwitch(lock, "Lead Movement", "Aim slightly ahead of them", "lockPredict")
+		addSlider(lock, "Lock Range", "Pick targets inside", "lockRange", 20, 200, 5, " studs")
+		addSlider(lock, "Camera Speed", "Higher snaps faster", "lockSpeed", 4, 60, 1, "")
+
+		local frontLock = addSection(assistPage, "Front Dash Lock")
+		addSwitch(frontLock, "Front Dash Lock", "Lock on when you front dash close to someone", "frontLock")
+		addSlider(frontLock, "Lock Range", "Counts as close inside this", "frontLockRange", 5, 40, 1, " studs")
+		addSlider(frontLock, "Lock Time", "How long the lock stays on", "frontLockTime", 0.3, 3, 0.1, "s")
+		addSwitch(frontLock, "Front Dash Aim", "Aim your W dash at the target", "assistFront")
+
+		local assist = addSection(assistPage, "Side Dash Assist")
+		addSwitch(assist, "Side Dash Assist", "Aim your A/D dash at the target", "assistSide")
+		addSwitch(assist, "Aim Lines", "White aim line and pink predicted dash paths", "assistLines")
+		addSwitch(assist, "Double Tap Target", "Double tap a player to pick them", "tapTarget")
+		addInfo(assist, "Target", function()
+			if Bot.tapTarget then
+				return Bot.tapTarget.Name .. " (tapped)"
+			end
+
+			return Bot.assistRoot and Bot.assistRoot.Parent and Bot.assistRoot.Parent.Name or "none"
+		end)
+		addAction(assist, "Clear Target", "Go back to lock or nearest", "Clear", function()
+			Bot.tapTarget = nil
+		end)
+		addSwitch(assist, "Circle Bend", "Bend close side dashes into a circle", "assistHook")
+		addSwitch(assist, "Back Dash Aim", "Face them through your S dash", "assistBack")
+		addSwitch(assist, "M1 After Dash", "Swing when the dash ends in reach", "assistM1")
+		addSlider(assist, "Assist Strength", "How much of the correction is applied", "assistStrength", 10, 100, 5, "%")
+		addSlider(assist, "Max Turn", "Largest correction, keeps it looking human", "assistMaxTurn", 10, 120, 5, "°")
+		addSlider(assist, "Wobble", "Random aim error", "assistJitter", 0, 10, 0.5, "°")
+		addSlider(assist, "Predict Lead", "Aim ahead of their movement", "assistLead", 0, 0.4, 0.01, "s")
+		addSlider(assist, "Path Length", "How far the pink line reaches", "assistDashLength", 8, 40, 1, " studs")
+		addSlider(assist, "Assist Range", "Nearest target inside", "assistRange", 10, 100, 1, " studs")
+		addSlider(assist, "Face Tail", "Keep facing after the dash", "assistTail", 0, 0.8, 0.05, "s")
+	end
+
+	-- Combat Lab.
+	local lab = addPage("Lab", 7, "🧪")
+
+	local labTop = newInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 244),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(lab),
+	}, lab)
+
+	-- Rotating copy of your character.
+	local previewCard = newInstance("Frame", {
+		Size = UDim2.new(0, 150, 1, 0),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, labTop)
+	corner(previewCard, 14)
+	outline(previewCard, 0.8)
+
+	local previewHolder = newInstance("Frame", {
+		Position = UDim2.fromOffset(6, 6),
+		Size = UDim2.new(1, -12, 1, -34),
+		BackgroundTransparency = 1,
+		ClipsDescendants = true,
+	}, previewCard)
+	newInstance("TextLabel", {
+		Position = UDim2.new(0, 0, 1, -26),
+		Size = UDim2.new(1, 0, 0, 20),
+		BackgroundTransparency = 1,
+		Text = "Drag to spin",
+		TextColor3 = COLORS.dim,
+		Font = Enum.Font.Gotham,
+		TextSize = 10,
+	}, previewCard)
+
+	local previewViewport = newInstance("ViewportFrame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Ambient = Color3.fromRGB(170, 190, 175),
+		LightColor = Color3.new(1, 1, 1),
+		LightDirection = Vector3.new(-0.5, -1, -0.6),
+		Active = true,
+	}, previewHolder)
+	local previewCamera = newInstance("Camera", { FieldOfView = 40 }, previewViewport)
+	previewViewport.CurrentCamera = previewCamera
+
+	local previewModel, previewPivot = nil, nil
+	local previewAngle, spinPausedUntil = 0, 0
+
+	local function rebuildPreview()
+		if previewModel then
+			previewModel:Destroy()
+			previewModel = nil
+		end
+
+		local character = localPlayer.Character
+		if not character then
+			return
+		end
+
+		local archivable = character.Archivable
+		character.Archivable = true
+		local clone = character:Clone()
+		character.Archivable = archivable
+		if not clone then
+			return
+		end
+
+		for _, descendant in ipairs(clone:GetDescendants()) do
+			if descendant:IsA("Script") or descendant:IsA("LocalScript") then
+				descendant:Destroy()
+			end
+		end
+
+		clone:PivotTo(CFrame.new(0, 0, 0))
+		clone.Parent = previewViewport
+		previewModel = clone
+		previewPivot = clone:GetPivot()
+
+		local center, size = clone:GetBoundingBox()
+		local distance = (size.Y / 2) / math.tan(math.rad(20)) * 1.3 + size.Z / 2
+		previewCamera.CFrame = CFrame.lookAt(center.Position + Vector3.new(0, size.Y * 0.05, -distance), center.Position)
+	end
+
+	task.defer(function()
+		pcall(rebuildPreview)
+	end)
+	connect(localPlayer.CharacterAdded, function()
+		task.delay(1.5, function()
+			pcall(rebuildPreview)
+		end)
+	end)
+
+	connect(runService.RenderStepped, function(delta)
+		if previewModel and previewPivot and os.clock() > spinPausedUntil then
+			previewAngle += delta * 0.8
+			previewModel:PivotTo(previewPivot * CFrame.Angles(0, previewAngle, 0))
+		end
+	end)
+
+	local previewDragging = false
+	connect(previewViewport.InputBegan, function(input)
+		if isPointer(input) then
+			previewDragging = true
+			spinPausedUntil = os.clock() + 2
+		end
+	end)
+	connect(userInputService.InputChanged, function(input)
+		if previewDragging and previewModel and previewPivot and isPointerMove(input) then
+			previewAngle += input.Delta.X * 0.015
+			spinPausedUntil = os.clock() + 2
+			previewModel:PivotTo(previewPivot * CFrame.Angles(0, previewAngle, 0))
+		end
+	end)
+	connect(userInputService.InputEnded, function(input)
+		if previewDragging and isPointer(input) then
+			previewDragging = false
+		end
+	end)
+
+	-- Result card.
+	local resultCard = newInstance("Frame", {
+		Position = UDim2.fromOffset(158, 0),
+		Size = UDim2.new(1, -158, 1, 0),
+		BackgroundColor3 = COLORS.card,
+		BackgroundTransparency = 0.2,
+		BorderSizePixel = 0,
+	}, labTop)
+	corner(resultCard, 14)
+	outline(resultCard, 0.8)
+
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 8),
+		Size = UDim2.new(1, -28, 0, 14),
+		BackgroundTransparency = 1,
+		Text = "RESULT",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamBold,
+		TextSize = 10,
+	}, resultCard)
+	local resultTitle = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 22),
+		Size = UDim2.new(1, -28, 0, 30),
+		BackgroundTransparency = 1,
+		Text = "Ready",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 22,
+	}, resultCard)
+	local resultDetail = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 54),
+		Size = UDim2.new(1, -28, 0, 70),
+		BackgroundTransparency = 1,
+		Text = "Pick a test below, then tap Run Test.",
+		TextColor3 = COLORS.dim,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+	}, resultCard)
+
+	local timelineFrame = newInstance("Frame", {
+		Position = UDim2.fromOffset(14, 132),
+		Size = UDim2.new(1, -28, 0, 28),
+		BackgroundColor3 = COLORS.off,
+		BackgroundTransparency = 0.3,
+		BorderSizePixel = 0,
+	}, resultCard)
+	corner(timelineFrame, 6)
+
+	newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 164),
+		Size = UDim2.new(1, -28, 0, 14),
+		BackgroundTransparency = 1,
+		Text = "top bar: dash   green: in reach   accent: block   tick: M1 or hit",
+		TextColor3 = COLORS.dim,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.Gotham,
+		TextSize = 9,
+	}, resultCard)
+	local summaryLabel = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 180),
+		Size = UDim2.new(1, -28, 0, 16),
+		BackgroundTransparency = 1,
+		Text = "No runs yet",
+		TextColor3 = COLORS.text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 11,
+	}, resultCard)
+
+	---Draw the timeline bars and ticks of a result.
+	---@param timeline table?
+	local function renderTimeline(timeline)
+		for _, child in ipairs(timelineFrame:GetChildren()) do
+			if child:IsA("GuiObject") then
+				child:Destroy()
+			end
+		end
+
+		if not timeline then
+			return
+		end
+
+		for _, bar in ipairs(timeline.bars) do
+			local from = math.clamp(bar.from / timeline.total, 0, 1)
+			local to = math.clamp(bar.to / timeline.total, 0, 1)
+			if to > from then
+				local frame = newInstance("Frame", {
+					Position = UDim2.new(from, 0, bar.lane * 0.5, bar.lane == 1 and 1 or 0),
+					Size = UDim2.new(to - from, 0, 0.5, -1),
+					BackgroundColor3 = bar.color,
+					BackgroundTransparency = 0.15,
+					BorderSizePixel = 0,
+				}, timelineFrame)
+				corner(frame, 3)
+			end
+		end
+
+		for _, tick in ipairs(timeline.ticks) do
+			newInstance("Frame", {
+				AnchorPoint = Vector2.new(0.5, 0),
+				Position = UDim2.new(math.clamp(tick.at / timeline.total, 0, 1), 0, 0, -3),
+				Size = UDim2.new(0, 3, 1, 6),
+				BackgroundColor3 = tick.color,
+				BorderSizePixel = 0,
+			}, timelineFrame)
+		end
+	end
+
+	---Show a lab result in the card.
+	---@param result table
+	local function showResult(result)
+		resultTitle.Text = result.title or "-"
+		resultTitle.TextColor3 = result.ok and COLORS.good or COLORS.bad
+
+		local lines = {}
+		for _, line in ipairs(result.lines or {}) do
+			if line ~= "" then
+				table.insert(lines, line)
+			end
+		end
+		resultDetail.Text = table.concat(lines, "\n")
+		summaryLabel.Text = result.summary or getLabSummary()
+		renderTimeline(result.timeline)
+	end
+	labResultCallback = showResult
+
+	local runOnce = newInstance("TextButton", {
+		Position = UDim2.fromOffset(14, 204),
+		Size = UDim2.fromOffset(108, 28),
+		BackgroundColor3 = COLORS.accent,
+		Text = "Run Test",
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, resultCard)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, runOnce)
+	addPress(runOnce)
+	connect(runOnce.MouseButton1Click, function()
+		if labRunning then
+			return
+		end
+
+		showResult({ title = "Running...", ok = true, lines = { "Testing " .. Settings.labTest .. "." }, summary = getLabSummary() })
+		startLab(1)
+	end)
+
+	local runBatch = newInstance("TextButton", {
+		Position = UDim2.fromOffset(130, 204),
+		Size = UDim2.fromOffset(108, 28),
+		BackgroundTransparency = 1,
+		Text = "Run x10",
+		TextColor3 = COLORS.text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		AutoButtonColor = false,
+	}, resultCard)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, runBatch)
+	outline(runBatch, 0.4, 1.5)
+	addPress(runBatch)
+	connect(runBatch.MouseButton1Click, function()
+		if labRunning then
+			return
+		end
+
+		showResult({ title = "Running...", ok = true, lines = { "Running 10 of " .. Settings.labTest .. "." }, summary = "" })
+		startLab(10)
+	end)
+
+	local scenario = addSection(lab, "Scenario")
+	addCycle(scenario, "Test", "What to simulate", "labTest", LAB_TEST_NAMES)
+	addSlider(scenario, "Start Distance", "Dash tests", "labDistance", 3, 25, 1, " studs")
+	addSlider(scenario, "Attack Distance", "Block tests", "labAttackDist", 3, 14, 1, " studs")
+	addSlider(scenario, "Simulated Ping", "Network delay", "labPing", 0, 250, 5, " ms")
+	addSlider(scenario, "Dash Speed", "Enemy dash speed", "labSpeed", 30, 100, 5, "")
+	addSlider(scenario, "True M1 Reach", "Includes the M1 lunge", "labReach", 3, 20, 0.5, " studs")
+	addSlider(scenario, "M1 Startup", "Click to hit delay", "labStartup", 0, 0.3, 0.01, "s")
+	addSlider(scenario, "Hit Frame", "Attack lands after", "labHit", 0.1, 0.8, 0.01, "s")
+	addSwitch(scenario, "Dry Run", "Don't send real inputs", "labDryRun")
+
+	local tune = addSection(lab, "Tune")
+	addSwitch(tune, "Auto Block", "Needed for block tests", "autoBlock")
+	addSlider(tune, "Block Lead", "React this early", "blockLead", 0, 0.3, 0.01, "s")
+	addSlider(tune, "Chain Tail", "Extra hold after a move", "blockTail", 0, 0.6, 0.05, "s")
+	addSlider(tune, "Hold Time", "Minimum time F is held", "blockHold", 0.1, 1, 0.05, "s")
+	addSwitch(tune, "Side Dash Auto M1", "Needed for side dash tests", "catchEnabled")
+	addSlider(tune, "Hit Reach", "M1 only fires inside this", "catchReach", 4, 30, 1, " studs")
+	addSwitch(tune, "Smart Timing", "Predict arrival, skip fixed delays", "catchSmart")
+	addSlider(tune, "Timing Offset", "Fire earlier (+) or later (-)", "catchOffset", -0.15, 0.25, 0.01, "s")
+	addSlider(tune, "Close Delay", "Wait before M1", "catchCloseDelay", 0, 0.6, 0.01, "s")
+	addSlider(tune, "Far Delay", "Wait before M1", "catchFarDelay", 0, 0.6, 0.01, "s")
+	addSwitch(tune, "Backdash Auto M1", "Needed for backdash tests", "bdcEnabled")
+	addSlider(tune, "Backdash Reach", "M1 only fires inside this", "bdcReach", 4, 30, 1, " studs")
+	addSlider(tune, "Backdash Delay", "Wait before M1", "bdcDelay", 0, 0.6, 0.01, "s")
+	addSwitch(tune, "Front Dash Block", "Needed for front dash tests", "frontBlock")
+	addSwitch(tune, "Side Dash Block", "Needed for the side dash block test", "dashPredict")
+	addSlider(tune, "Front Chain Tail", "Keep blocking after it ends", "frontTail", 0, 0.8, 0.05, "s")
+
+	local learnCard = addSection(lab, "Learn Animations")
+	addAction(learnCard, "Learn M1 String", "Then swing for 5 seconds", "Learn", function()
+		learning = "m1"
+		log("learning M1 string: swing now")
+		task.delay(5, function()
+			if learning == "m1" then
+				learning = nil
+				log("M1 learning finished")
+			end
+		end)
+	end)
+	addInfo(learnCard, "Learned M1", function()
+		return learning == "m1" and "swing now..." or (countLearned("m1") .. " ids")
+	end)
+
+	-- Dashes.
+	local dashPage = addPage("Dashes", 8, "💨")
+
+	local input = addSection(dashPage, "M1 Input")
+	addCycle(input, "M1 Method", "How M1s are sent", "m1Method", { "Remote+Mobile", "Remote", "Signal", "Button" })
+	addAction(input, "Test M1", "Send one M1", "Test", function()
+		clickM1("test")
+	end)
+
+	local side = addSection(dashPage, "Side Dash")
+	addSwitch(side, "Auto M1", "M1 on a side dash", "catchEnabled")
+	addSwitch(side, "Predict And Block", "Block side dashes that will reach you", "dashPredict")
+	addSwitch(side, "Predictor", "Walk the dash path: M1 if it lands, else block, sent early", "dashPredictor")
+	addSwitch(side, "Anticipate", "Arm early on chained dashes, moves ending and strafing", "dashAnticipate")
+	addSlider(side, "Predict Lead", "Extra seconds to send inputs early", "predictLead", 0, 0.15, 0.01, "s")
+	addSwitch(side, "Lock Target", "Face them during the catch", "catchFace")
+	addSwitch(side, "Smart Timing", "Predict arrival, skip fixed delays", "catchSmart")
+	addSwitch(side, "Visualizer", "Rings and timing line", "catchVisual")
+	addSlider(side, "Timing Offset", "Fire earlier (+) or later (-)", "catchOffset", -0.15, 0.25, 0.01, "s")
+	addSlider(side, "Fixed Delay", "Wait before M1 when Smart is off", "catchDelay", 0, 0.6, 0.01, "s")
+	addSlider(side, "Max Range", "Far range", "catchRange", 5, 60, 1, " studs")
+	addSlider(side, "Hit Reach", "M1 only fires inside this", "catchReach", 4, 30, 1, " studs")
+	addSlider(side, "Lock Time", "How long to lock on", "catchLock", 0.5, 2.5, 0.1, "s")
+	addSlider(side, "Block Reach", "Block if they get this close", "predictReach", 4, 20, 1, " studs")
+	addSlider(side, "Block After", "Keep blocking after arrival", "predictTail", 0, 1, 0.05, "s")
+
+	local back = addSection(dashPage, "Backdash M1")
+	addSwitch(back, "Enabled", "M1 on a backdash", "bdcEnabled")
+	addSlider(back, "Range", "How close they must be", "bdcRange", 5, 60, 1, " studs")
+	addSlider(back, "Hit Reach", "M1 only fires inside this", "bdcReach", 4, 30, 1, " studs")
+	addSlider(back, "Delay", "Wait before M1", "bdcDelay", 0, 0.6, 0.01, "s")
+	addAction(back, "Learn Backdash", "Then backdash yourself", "Learn", function()
+		learning = "back"
+		log("learning backdash: backdash now")
+	end)
+	addInfo(back, "Learned", function()
+		return learning == "back" and "waiting..." or (countLearned("back") .. " ids")
+	end)
+
+	local counters = addSection(dashPage, "Counters")
+	addSwitch(counters, "Counter Bait", "No M1 into a counter", "counterBait")
+	addSwitch(counters, "Counter Punish", "M1 when a counter ends", "counterPunish")
+
+	-- Visuals.
+	local visualsPage = addPage("Visuals", 10, "👁")
+	local esp = addSection(visualsPage, "Players")
+	addSwitch(esp, "ESP", "Highlight and health", "esp")
+	addSwitch(esp, "Self Chams", "Highlight yourself", "selfChams")
+	addSwitch(esp, "Safe-to-Hit", "Open, punish, counter markers", "safeIndicator")
+	addSlider(esp, "Safe Range", "Marker distance", "safeRange", 10, 60, 1, " studs")
+	addSwitch(esp, "Combo Counter", "Hit streak pill", "comboCounter")
+
+	local world = addSection(visualsPage, "World")
+	addSwitch(world, "Custom FOV", "Override field of view", "fovEnabled")
+	addSlider(world, "Field of View", "Degrees", "fov", 40, 120, 1, "°")
+	addSwitch(world, "No Smoke", "Hide smoke and dust", "noSmoke")
+	addSwitch(world, "No Shadows", "Turn global shadows off", "noShadows")
+
+	-- Whitelist.
+	local whitelistPage = addPage("Whitelist", 11, "✅")
+	local friends = addSection(whitelistPage, "Friends")
+	addSwitch(friends, "Friend Check", "Skip Roblox friends", "friendCheck")
+
+	local playersCard = addSection(whitelistPage, "Players")
+	local function refreshWhitelist()
+		for _, child in ipairs(playersCard:GetChildren()) do
+			if child:IsA("GuiObject") then
+				child:Destroy()
+			end
+		end
+
+		local added = false
+		for _, player in ipairs(playersService:GetPlayers()) do
+			if player ~= localPlayer then
+				local key = "wl_" .. player.Name
+				if Settings[key] == nil then
+					Settings[key] = false
+				end
+
+				addSwitch(playersCard, player.Name, "Skipped by every feature", key)
+				added = true
+			end
+		end
+
+		if not added then
+			createRow(playersCard, "No other players", nil, "Frame")
+		end
+	end
+
+	refreshWhitelist()
+	connect(playersService.PlayerAdded, function()
+		task.delay(0.3, refreshWhitelist)
+	end)
+	connect(playersService.PlayerRemoving, function()
+		task.delay(0.3, refreshWhitelist)
+	end)
+
+	-- Misc.
+	local miscPage = addPage("Misc", 12, "☰")
+	local interface = addSection(miscPage, "Interface")
+	addSwitch(interface, "Quick Pills", "Toggle buttons on the left", "quickPills")
+	addSwitch(interface, "Indicators", "Active feature list", "indicators")
+
+	local presets = addSection(miscPage, "Presets")
+	addCycle(presets, "Slot", "Preset slot", "presetSlot", { "Slot 1", "Slot 2", "Slot 3" })
+	addAction(presets, "Save", "Store current settings", "Save", savePreset)
+	addAction(presets, "Load", "Restore saved settings", "Load", loadPreset)
+	addInfo(presets, "Status", function()
+		return presetStatus
+	end)
+
+	local data = addSection(miscPage, "Data")
+	addAction(data, "Reset Learned", "Clears timings and moves", "Reset", function()
+		table.clear(moveData)
+		table.clear(learned.barrage)
+		table.clear(learned.shove)
+		table.clear(learned.uppercut)
+		table.clear(learned.back)
+		table.clear(learned.front)
+		table.clear(learned.m1)
+		table.clear(dashSpeeds)
+	end)
+	addAction(data, "Unload", "Remove Slotted", "Unload", function()
+		Zenny.detach()
+	end)
+
+	-- Debug.
+	local debugPage = addPage("Debug", 13, "🐞")
+	local tools = addSection(debugPage, "Tools")
+	addInfo(tools, "Input remote", function()
+		return getRemote() and "found" or "MISSING"
+	end)
+	addAction(tools, "Test M1", "Fire one M1", "Test", function()
+		clickM1("test")
+	end)
+	addAction(tools, "Test All M1", "Tries every method in turn", "Run", testAllM1)
+	addAction(tools, "Scan Buttons", "List on-screen buttons", "Scan", scanButtons)
+	addAction(tools, "Test Block", "Hold F briefly", "Test", function()
+		pressBlock(0.5)
+	end)
+	addAction(tools, "Scan Remotes", "List remotes in the log", "Scan", scanRemotes)
+	addAction(tools, "Clear Log", "Empty the log", "Clear", function()
+		table.clear(logLines)
+	end)
+	addSwitch(tools, "Console Log", "Also print to the console", "debugConsole")
+
+	local logCard = addSection(debugPage, "Log")
+	local logLabel = newInstance("TextLabel", {
+		Size = UDim2.new(1, -24, 0, 0),
+		Position = UDim2.fromOffset(12, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		Text = "",
+		TextColor3 = COLORS.dim,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Font = Enum.Font.Code,
+		TextSize = 11,
+		LayoutOrder = 1,
+	}, logCard)
+	newInstance("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }, logCard)
+
+	connect(bell.MouseButton1Click, function()
+		selectTab("Debug")
+	end)
+
+	-- Search filters rows on every page and jumps to a page with matches.
+	local function applySearch(query)
+		query = query:lower()
+		local counts = {}
+		local visibleCards = {}
+
+		for _, entry in ipairs(rowRegistry) do
+			if entry.row.Parent then
+				local match = query == "" or entry.title:find(query, 1, true) ~= nil
+				entry.row.Visible = match
+
+				if match then
+					visibleCards[entry.card] = true
+					local pageName = pageOfScroll[entry.card.Parent]
+					if pageName then
+						counts[pageName] = (counts[pageName] or 0) + 1
+					end
+				end
+			end
+		end
+
+		for card, header in pairs(sectionHeaders) do
+			if card.Parent then
+				local visible = query == "" or visibleCards[card] == true
+				card.Visible = visible
+				header.Visible = visible
+			end
+		end
+
+		return counts
+	end
+
+	connect(searchBox:GetPropertyChangedSignal("Text"), function()
+		local counts = applySearch(searchBox.Text)
+		if searchBox.Text ~= "" and not counts[activeTab] then
+			for _, name in ipairs(tabOrder) do
+				if counts[name] then
+					selectTab(name)
+					break
+				end
+			end
+		end
+	end)
+
+	-- Refresh the home stats, info rows and log twice a second.
+	local frames, statsElapsed = 0, 0
+	local fpsHistory = {}
+	connect(runService.Heartbeat, function(delta)
+		frames += 1
+		statsElapsed += delta
+		if statsElapsed < 0.5 then
+			return
+		end
+
+		local fps = frames / statsElapsed
+		frames, statsElapsed = 0, 0
+
+		table.insert(fpsHistory, fps)
+		if #fpsHistory > #fpsBars then
+			table.remove(fpsHistory, 1)
+		end
+
+		fpsValue.Text = string.format("%d", fps)
+		for index, bar in ipairs(fpsBars) do
+			local sample = fpsHistory[index] or 0
+			tween(bar, { Size = UDim2.new(1 / #fpsBars, -2, math.clamp(sample / 70, 0.08, 1), 0) }, QUICK)
+		end
+
+		local active = 0
+		for _, info in ipairs(INDICATOR_LIST) do
+			if Settings[info[1]] then
+				active += 1
+			end
+		end
+		moduleValue.Text = tostring(active)
+		for index, bar in ipairs(moduleBars) do
+			local lit = index <= math.ceil(active / (#INDICATOR_LIST / #moduleBars))
+			tween(bar, {
+				Size = UDim2.new(1 / #moduleBars, -2, 0.2 + 0.8 * index / #moduleBars, 0),
+				BackgroundTransparency = (lit and active > 0) and 0.1 or 0.7,
+			}, QUICK)
+		end
+
+		runtimeValue.Text = formatRuntime(os.clock() - loadedAt)
+		for index, bar in ipairs(runtimeBars) do
+			tween(bar, { Size = UDim2.new(1 / #runtimeBars, -2, 0.25 + 0.5 * math.abs(math.sin(os.clock() / 3 + index)), 0) }, SMOOTH)
+		end
+
+		for _, tile in ipairs(tiles) do
+			local on = Settings[tile.key]
+			tween(tile.tile, { BackgroundColor3 = on and COLORS.accentDark or COLORS.off, BackgroundTransparency = on and 0.35 or 0.45 }, QUICK)
+			tween(tile.stroke, { Transparency = on and 0.1 or 0.85 }, QUICK)
+		end
+
+		local remoteFound = getRemote() ~= nil
+		statusDot.BackgroundColor3 = remoteFound and COLORS.accent or COLORS.bad
+		statusText.Text = remoteFound and "All Systems Operational" or "Input remote missing"
+		statusDetail.Text = string.format("Ping %d ms\nLearned %d moves", getPing(), countLearned("barrage") + countLearned("shove") + countLearned("uppercut"))
+
+		for _, info in ipairs(infoRows) do
+			if info.label.Parent then
+				info.label.Text = info.get()
+			end
+		end
+
+		if activeTab == "Debug" then
+			local first = math.max(#logLines - 24, 1)
+			logLabel.Text = table.concat(logLines, "\n", first, #logLines)
+		end
+	end)
+
+	-- Open and close with a fade and scale.
+	local windowOpen = false
+	local function setWindowOpen(state)
+		windowOpen = state
+		if state then
+			window.Visible = true
+		else
+			task.delay(0.22, function()
+				if not windowOpen then
+					window.Visible = false
+				end
+			end)
+		end
+
+		tween(window, { GroupTransparency = state and 0 or 1 })
+		tween(windowScale, { Scale = state and 1 or 0.94 })
+	end
+
+	connect(minimizeButton.MouseButton1Click, function()
+		setWindowOpen(false)
+	end)
+
+	-- Close needs a second tap so it is not hit by accident.
+	local closeArmed = false
+	connect(closeButton.MouseButton1Click, function()
+		if closeArmed then
+			Zenny.detach()
+			return
+		end
+
+		closeArmed = true
+		closeButton.TextColor3 = COLORS.bad
+		task.delay(2, function()
+			closeArmed = false
+			if closeButton.Parent then
+				closeButton.TextColor3 = COLORS.dim
+			end
+		end)
+	end)
+
+	-- Floating opener for when the window is hidden.
+	local opener = newInstance("TextButton", {
+		Position = UDim2.fromOffset(12, math.floor(viewport.Y / 2) - 20),
+		Size = UDim2.fromOffset(44, 44),
+		BackgroundColor3 = COLORS.accent,
+		Text = "Z",
+		TextColor3 = COLORS.ink,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 20,
+		AutoButtonColor = false,
+	}, gui)
+	newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, opener)
+	newInstance("UIStroke", { Color = COLORS.accent, Transparency = 0.5, Thickness = 3 }, opener)
+	addPress(opener)
+	connect(opener.MouseButton1Click, function()
+		setWindowOpen(not windowOpen)
+	end)
+
+	-- Touch pad: lock, next target, bot, combo and stop, draggable by its handle.
+	do
+		local pad = newInstance("Frame", {
+			Position = UDim2.fromOffset(math.max(viewport.X - 72, 0), math.max(math.floor(viewport.Y / 2) - 150, 0)),
+			Size = UDim2.fromOffset(56, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			BackgroundTransparency = 1,
+		}, gui)
+		newInstance("UIListLayout", {
+			Padding = UDim.new(0, 8),
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}, pad)
+
+		local status = newInstance("TextLabel", {
+			Position = UDim2.fromOffset(-190, 0),
+			Size = UDim2.fromOffset(184, 40),
+			BackgroundColor3 = COLORS.card,
+			BackgroundTransparency = 0.15,
+			TextColor3 = COLORS.text,
+			TextWrapped = true,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 12,
+			Visible = false,
+		}, pad)
+		newInstance("UICorner", { CornerRadius = UDim.new(0, 10) }, status)
+
+		local handle = newInstance("TextButton", {
+			Size = UDim2.fromOffset(56, 22),
+			BackgroundColor3 = COLORS.card,
+			BackgroundTransparency = 0.15,
+			Text = "• • •",
+			TextColor3 = COLORS.dim,
+			Font = Enum.Font.GothamBold,
+			TextSize = 12,
+			AutoButtonColor = false,
+			LayoutOrder = 0,
+		}, pad)
+		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, handle)
+
+		local dragOrigin, padOrigin = nil, nil
+		connect(handle.InputBegan, function(input)
+			if isPointer(input) then
+				dragOrigin, padOrigin = input.Position, pad.Position
+			end
+		end)
+		connect(userInputService.InputChanged, function(input)
+			if dragOrigin and isPointerMove(input) then
+				local delta = input.Position - dragOrigin
+				pad.Position = UDim2.fromOffset(padOrigin.X.Offset + delta.X, padOrigin.Y.Offset + delta.Y)
+			end
+		end)
+		connect(userInputService.InputEnded, function(input)
+			if dragOrigin and isPointer(input) then
+				dragOrigin = nil
+			end
+		end)
+
+		local lit = {}
+		local function addPadButton(order, text, callback, isOn)
+			local button = newInstance("TextButton", {
+				Size = UDim2.fromOffset(52, 52),
+				BackgroundColor3 = COLORS.card,
+				Text = text,
+				TextColor3 = COLORS.text,
+				Font = Enum.Font.GothamBold,
+				TextSize = 13,
+				AutoButtonColor = false,
+				LayoutOrder = order,
+			}, pad)
+			newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, button)
+			newInstance("UIStroke", { Color = COLORS.accent, Transparency = 0.45, Thickness = 2 }, button)
+			addPress(button)
+			connect(button.MouseButton1Click, callback)
+			table.insert(lit, { button = button, isOn = isOn })
+		end
+
+		addPadButton(1, "LOCK", function()
+			Bot.setLock(not Bot.lockOn)
+		end, function()
+			return Bot.lockOn
+		end)
+		addPadButton(2, "NEXT", function()
+			Bot.cycleLock()
+		end)
+		addPadButton(3, "BOT", function()
+			Settings.botEnabled = not Settings.botEnabled
+			Bot.refreshSetting("botEnabled")
+		end, function()
+			return Settings.botEnabled
+		end)
+		addPadButton(4, "COMBO", function()
+			Bot.playSelected()
+		end, function()
+			return Bot.comboRun ~= nil
+		end)
+		addPadButton(5, "STOP", function()
+			Bot.stopAll()
+		end)
+
+		connect(runService.Heartbeat, function()
+			pad.Visible = Settings.padVisible
+			for _, entry in ipairs(lit) do
+				local on = entry.isOn and entry.isOn() or false
+				entry.button.BackgroundColor3 = on and COLORS.accent or COLORS.card
+				entry.button.TextColor3 = on and COLORS.ink or COLORS.text
+			end
+
+			local text = Bot.lessonText()
+			status.Visible = text ~= ""
+			status.Text = text
+		end)
+	end
+
+	connect(userInputService.InputBegan, function(input, processed)
+		if not processed and input.KeyCode == TOGGLE_KEY then
+			setWindowOpen(not windowOpen)
+		end
+	end)
+
+	-- Drag the window from the top bar or the logo.
+	local dragStart, startPosition
+	local function beginDrag(input)
+		if isPointer(input) then
+			dragStart, startPosition = input.Position, window.Position
+		end
+	end
+	connect(topBar.InputBegan, beginDrag)
+	connect(logoRow.InputBegan, beginDrag)
+	connect(userInputService.InputChanged, function(input)
+		if dragStart and isPointerMove(input) then
+			local delta = input.Position - dragStart
+			local screen = workspace.CurrentCamera.ViewportSize
+			local x = math.clamp(startPosition.X.Offset + delta.X, 0, math.max(screen.X - width, 0))
+			local y = math.clamp(startPosition.Y.Offset + delta.Y, 0, math.max(screen.Y - height, 0))
+			window.Position = UDim2.fromOffset(x, y)
+		end
+	end)
+	connect(userInputService.InputEnded, function(input)
+		if dragStart and isPointer(input) then
+			dragStart = nil
+		end
+	end)
+
+	-- Quick toggle pills for fast changes mid-fight.
+	local quick = newInstance("Frame", {
+		Position = UDim2.fromOffset(12, math.floor(viewport.Y / 2) + 34),
+		Size = UDim2.fromOffset(96, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+	}, gui)
+	newInstance("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, quick)
+
+	local quickEntries = {}
+	for index, info in ipairs({ { "Block", "autoBlock" }, { "Evasive", "autoEvasive" }, { "Catch", "catchEnabled" }, { "Lock", "catchFace" } }) do
+		local pill = newInstance("TextButton", {
+			Size = UDim2.fromOffset(96, 30),
+			BackgroundColor3 = COLORS.off,
+			BackgroundTransparency = 0.3,
+			Text = info[1],
+			TextColor3 = COLORS.dim,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 13,
+			AutoButtonColor = false,
+			LayoutOrder = index,
+		}, quick)
+		newInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, pill)
+		local stroke = newInstance("UIStroke", { Color = COLORS.accent, Transparency = 0.7, Thickness = 1 }, pill)
+		addPress(pill)
+		quickEntries[index] = { pill = pill, stroke = stroke, key = info[2] }
+
+		connect(pill.MouseButton1Click, function()
+			Settings[info[2]] = not Settings[info[2]]
+			local refresh = uiRefreshers[info[2]]
+			if refresh then
+				refresh(true)
+			end
+			onSettingChanged(info[2])
+		end)
+	end
+
+	local quickElapsed = 0
+	connect(runService.Heartbeat, function(delta)
+		quickElapsed += delta
+		if quickElapsed < 0.15 then
+			return
+		end
+
+		quickElapsed = 0
+		quick.Visible = Settings.quickPills
+
+		for _, entry in ipairs(quickEntries) do
+			local on = Settings[entry.key]
+			if entry.shown ~= on then
+				entry.shown = on
+				tween(entry.pill, {
+					BackgroundColor3 = on and COLORS.accent or COLORS.off,
+					BackgroundTransparency = on and 0.1 or 0.3,
+					TextColor3 = on and COLORS.ink or COLORS.dim,
+				})
+				tween(entry.stroke, { Transparency = on and 0.2 or 0.7 })
+			end
+		end
+	end)
+
+	-- Active feature list on the left.
+	local indicatorLabel = newInstance("TextLabel", {
+		Position = UDim2.fromOffset(14, 96),
+		Size = UDim2.fromOffset(190, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		TextColor3 = COLORS.accent,
+		TextStrokeTransparency = 0.5,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+		Text = "",
+	}, gui)
+
+	local indicatorElapsed = 0
+	connect(runService.Heartbeat, function(delta)
+		indicatorElapsed += delta
+		if indicatorElapsed < 0.25 then
+			return
+		end
+
+		indicatorElapsed = 0
+		indicatorLabel.Visible = Settings.indicators
+
+		local lines = {}
+		for _, info in ipairs(INDICATOR_LIST) do
+			if Settings[info[1]] then
+				table.insert(lines, info[2])
+			end
+		end
+		indicatorLabel.Text = table.concat(lines, "\n")
+	end)
+
+	selectTab("Home")
+	setWindowOpen(true)
+end
+
+---Initialize the script.
+function Zenny.init()
+	buildGui()
+
+	connect(runService.Heartbeat, function()
+		scanOwn()
+		scanEnemies()
+		updateThreats()
+		updateDashes()
+		updateEvasive()
+		updatePreBlock()
+		Bot.update()
+		updateBlockController()
+		updateCounterBait()
+		updateLockFrame()
+		updateEsp()
+		updateSelfChams()
+		updateSafeIndicator()
+		updateComboCounter()
+	end)
+
+	Bot.load()
+	Bot.installHook()
+	runService:BindToRenderStep("ZennyLock", Enum.RenderPriority.Camera.Value + 1, Bot.updateCamera)
+	connect(userInputService.InputBegan, Bot.onKey)
+	connect(userInputService.InputBegan, Bot.onTap)
+
+	connect(runService.RenderStepped, function()
+		Bot.applyMove()
+		local camera = workspace.CurrentCamera
+		if Settings.fovEnabled and camera then
+			camera.FieldOfView = Settings.fov
+		end
+	end)
+
+	connect(workspace.DescendantAdded, onDescendantAdded)
+	connect(playersService.PlayerRemoving, removeEsp)
+
+	log("Slotted loaded; input remote " .. (getRemote() and "found" or "missing"))
+end
+
+---Tear everything down and restore touched state.
+function Zenny.detach()
+	for _, connection in ipairs(connections) do
+		connection:Disconnect()
+	end
+	table.clear(connections)
+
+	for player in pairs(espObjects) do
+		removeEsp(player)
+	end
+
+	for track in pairs(dashes) do
+		untrackDash(track, true)
+	end
+
+	for _, entry in pairs(moves) do
+		if entry.holding then
+			entry.holding = false
+			releaseBlock()
+		end
+	end
+	table.clear(moves)
+	table.clear(infoRows)
+	table.clear(rowRegistry)
+
+	if blockDown then
+		local remote = getRemote()
+		if remote then
+			remote:FireServer({ Goal = "KeyRelease", Key = BLOCK_KEY })
+		end
+		blockDown = false
+	end
+
+	shared.ZennyRecord = nil
+	pcall(function()
+		runService:UnbindFromRenderStep("ZennyLock")
+	end)
+	Bot.recording = nil
+	Bot.lesson = nil
+	Bot.studySubject = nil
+	Bot.lockOn = false
+	Bot.lockTarget = nil
+	if Bot.comboRun then
+		Bot.comboRun.cancel = true
+	end
+	if Bot.macroRun then
+		Bot.macroRun.cancel = true
+	end
+
+	if Bot.active then
+		Bot.active = false
+		Settings.botEnabled = false
+		Bot.applyProfile(false)
+		Bot.moveVector = Vector3.zero
+	end
+
+	labRun = nil
+	removeLabDummy()
+	stopLock()
+	lightingService.GlobalShadows = originalShadows
+
+	if gui then
+		gui:Destroy()
+	end
+end
+
+---@param error string
+local function onInitializeError(error)
+	warn("Slotted failed to initialize.")
+	warn(error)
+	warn(debug.traceback())
+	Zenny.detach()
+end
+
+-- Shared-state singleton.
+if shared.Zenny then
+	shared.Zenny.detach()
+end
+shared.Zenny = Zenny
+
+xpcall(Zenny.init, onInitializeError)
